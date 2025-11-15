@@ -189,8 +189,8 @@ if __name__ == "__main__":
         default="RunsenXu_M40_I/PointLLM_7B_v1.2")
 
     # * dataset type
-    parser.add_argument("--data_path", type=str, default="data/objaverse_data", required=False)
-    parser.add_argument("--anno_path", type=str, default="data/anno_data/PointLLM_brief_description_val_200_GT.json", required=False)
+    parser.add_argument("--data_path", type=str, default="data/customize_data", required=False)
+    parser.add_argument("--anno_path", type=str, default="data/anno_data/3Dpoint_cloud_no_color.json", required=False)
     parser.add_argument("--pointnum", type=int, default=8192)
     parser.add_argument("--use_color",  action="store_true", default=True)
 

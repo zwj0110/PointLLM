@@ -207,7 +207,7 @@ Usually, you do not have to care about the following contents. They are only for
 2. Run the following command to launch a chatbot using the `torch.float32` data type for chatting about 3D models of Objaverse. The model checkpoints will be downloaded automatically. You can also manually download the model checkpoints and specify their paths. Here is an example:
 ```bash
 cd PointLLM
-PYTHONPATH=$PWD python pointllm/eval/PointLLM_chat.py --model_name RunsenXu/PointLLM_7B_v1.2 --data_name data/objaverse_data --torch_dtype float32
+PYTHONPATH=$PWD python pointllm/eval/PointLLM_chat.py --model_name RunsenXu_M40_I/PointLLM_7B_v1.2 --data_name data/objaverse_data --torch_dtype float32
 ```
 3. You can also easily modify the codes for using point clouds other than those from Objaverse, as long as the point clouds input to the model have dimensions (N, 6), where the first three dimensions are `xyz` and the last three dimensions are `rgb` (in [0, 1] range). You may sample the point clouds to have 8192 points, as our model is trained on such point clouds.
 4. The following table shows GPU requirements for different models and data types. We recommend using `torch.bfloat16` if applicable, which is used in the experiments in our paper.
@@ -223,7 +223,7 @@ PYTHONPATH=$PWD python pointllm/eval/PointLLM_chat.py --model_name RunsenXu/Poin
 1. We provide the codes for our online Gradio demo. You can run the following commands to launch the demo locally for chatting and visualization.
 ```bash
 cd PointLLM
-PYTHONPATH=$PWD python pointllm/eval/chat_gradio.py --model_name RunsenXu/PointLLM_7B_v1.2 --data_name data/objaverse_data
+PYTHONPATH=$PWD python pointllm/eval/chat_gradio.py --model_name RunsenXu_M40_I/PointLLM_7B_v1.2 --data_name data/objaverse_data
 ```
 2. Kind remind: if you want to release the demo in public, please refer to https://www.gradio.app/guides/sharing-your-app#security-and-file-access.
 
@@ -236,13 +236,13 @@ cd PointLLM
 export PYTHONPATH=$PWD
 
 # Open Vocabulary Classification on Objaverse
-python pointllm/eval/eval_objaverse.py --model_name RunsenXu/PointLLM_7B_v1.2 --task_type classification --prompt_index 0 # or --prompt_index 1
+python pointllm/eval/eval_objaverse.py --model_name RunsenXu_M40_I/PointLLM_7B_v1.2 --task_type classification --prompt_index 0 # or --prompt_index 1
 
 # Object captioning on Objaverse
-python pointllm/eval/eval_objaverse.py --model_name RunsenXu/PointLLM_7B_v1.2 --task_type captioning --prompt_index 2
+python pointllm/eval/eval_objaverse.py --model_name RunsenXu_M40_I/PointLLM_7B_v1.2 --task_type captioning --prompt_index 2
 
 # Close-set Zero-shot Classification on ModelNet40
-python pointllm/eval/eval_modelnet_cls.py --model_name RunsenXu/PointLLM_7B_v1.2 --prompt_index 0 # or --prompt_index 1
+python pointllm/eval/eval_modelnet_cls.py --model_name RunsenXu_M40_I/PointLLM_7B_v1.2 --prompt_index 0 # or --prompt_index 1
 ```
 3. Please check the default command-line arguments of these two scripts. You can specify different prompts, data paths, and other parameters. 
 4. After inferencing, the results will be saved in `{model_name}/evaluation` as a dict with the following format:
@@ -295,7 +295,7 @@ Some of the metrics are explained as follows:
 ```
 5. <b>Open-Step Evaluation.</b> You can also start evaluation immediately after inferencing by passing the `--start_eval` flag and specifying the `--gpt_type`. For example:
 ```bash
-python pointllm/eval/eval_objaverse.py --model_name RunsenXu/PointLLM_7B_v1.2 --task_type classification --prompt_index 0 --start_eval --gpt_type gpt-4-0613
+python pointllm/eval/eval_objaverse.py --model_name RunsenXu_M40_I/PointLLM_7B_v1.2 --task_type classification --prompt_index 0 --start_eval --gpt_type gpt-4-0613
 ```
 
 #### Traditional Metric Evaluation

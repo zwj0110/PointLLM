@@ -41,7 +41,8 @@ def init_model(args):
     logging.warning(f'Model name: {os.path.basename(model_name)}')
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True).cuda()
+    #model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True).cuda()
+    model = PointLLMLlamaForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=False, use_cache=True).to('mps')
     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
 
     model.eval()
@@ -170,7 +171,7 @@ def start_conversation(args, model, tokenizer, point_backbone_config, keywords, 
             if 8192 < points.shape[0]:
                 points = farthest_point_sample(points, 8192)
             point_clouds = pc_norm(points)
-            point_clouds = torch.from_numpy(point_clouds).unsqueeze_(0).to(torch.float32).cuda()
+            point_clouds = torch.from_numpy(point_clouds).unsqueeze_(0).to(torch.float32).to('mps')
             
             answer_time = 0
             conv.reset()
@@ -210,7 +211,7 @@ def start_conversation(args, model, tokenizer, point_backbone_config, keywords, 
                 logging.warning("#" * 80)
                 inputs = tokenizer([prompt])
 
-                input_ids = torch.as_tensor(inputs.input_ids).cuda()
+                input_ids = torch.as_tensor(inputs.input_ids).to('mps')
 
                 stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
                 stop_str = keywords[0]
@@ -345,7 +346,7 @@ def start_conversation(args, model, tokenizer, point_backbone_config, keywords, 
                 """
             )
         demo.queue()
-        demo.launch(server_name="0.0.0.0", server_port=args.port, share=False)    # server_port=7832, share=True
+        demo.launch(allowed_paths=["/Users/zhengwenjie/.objaverse"], server_name="0.0.0.0", server_port=args.port, share=False)    # server_port=7832, share=True
     
 if __name__ == "__main__":
     # ! To release this demo in public, make sure to start in a place where no important data is stored.
@@ -353,7 +354,7 @@ if __name__ == "__main__":
     # ! refer to https://www.gradio.app/guides/sharing-your-app#security-and-file-access
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-name", type=str, \
-         default="RunsenXu/PointLLM_7B_v1.2")
+         default="RunsenXu_M40_I/PointLLM_7B_v1.2")
 
 
     parser.add_argument("--data_path", type=str, default="data/objaverse_data", required=False)

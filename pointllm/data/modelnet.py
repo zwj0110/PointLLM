@@ -45,7 +45,7 @@ class ModelNet(Dataset):
 
         self.catfile = os.path.join(os.path.dirname(__file__), "modelnet_config", 'modelnet40_shape_names_modified.txt')
 
-        # "tv_stand" -> "tv stand"
+        # "tv stand" -> "tv stand"
         self.categories = [line.rstrip() for line in open(self.catfile)] # * list of category names
 
         self.save_path = os.path.join(self.root,

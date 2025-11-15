@@ -142,7 +142,7 @@ class ObjectPointCloudDataset(Dataset):
             return self._load_objaverse_point_cloud(object_id) 
 
     def _load_objaverse_point_cloud(self, object_id):
-        filename = f"{object_id}_{self.pointnum}.npy"
+        filename = f"{object_id}.npy"
         point_cloud = np.load(os.path.join(self.data_path, filename))
 
         if not self.use_color:
@@ -176,10 +176,20 @@ class ObjectPointCloudDataset(Dataset):
             point_cloud = self._load_point_cloud(object_id) # * N, C
             if self.normalize_pc:
                 point_cloud = self.pc_norm(point_cloud) # * need to norm since point encoder is norm
-
+            N, C = point_cloud.shape
+            M = self.pointnum
+            if N >= M:
+                # 随机无放回采样 M 个点
+                choice = np.random.choice(N, M, replace=False)
+                point_cloud = point_cloud[choice]
+            else:
+                # 少于 M 点时，用 0 填充到 M
+                pad = np.zeros((M - N, C), dtype=point_cloud.dtype)
+                point_cloud = np.vstack([point_cloud, pad])
+            point_tensor = torch.from_numpy(point_cloud.astype(np.float32))
             if self.tokenizer is None:
                 data_dict = dict(
-                    point_clouds=torch.from_numpy(point_cloud.astype(np.float32)),
+                    point_clouds=point_tensor,
                     object_ids=object_id
                 )
                 return data_dict

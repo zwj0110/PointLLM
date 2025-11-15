@@ -142,7 +142,7 @@ class PointTransformer(nn.Module):
         self.norm = nn.LayerNorm(self.trans_dim)
 
     def load_checkpoint(self, bert_ckpt_path):
-        ckpt = torch.load(bert_ckpt_path, map_location='cpu')
+        ckpt = torch.load(bert_ckpt_path, map_location='cpu', weights_only=False)
         state_dict = OrderedDict()
         for k, v in ckpt['state_dict'].items():
             if k.startswith('module.point_encoder.'):
@@ -170,20 +170,35 @@ class PointTransformer(nn.Module):
         # divide the point cloud in the same form. This is important
         neighborhood, center = self.group_divider(pts)
         # encoder the input cloud blocks
-        group_input_tokens = self.encoder(neighborhood)  # B G N
-        group_input_tokens = self.reduce_dim(group_input_tokens)
+        group_input_tokens = self.encoder(neighborhood)  # B, G, C_enc
+        group_input_tokens = self.reduce_dim(group_input_tokens)  # B, G, trans_dim
+
         # prepare cls
-        cls_tokens = self.cls_token.expand(group_input_tokens.size(0), -1, -1)
-        cls_pos = self.cls_pos.expand(group_input_tokens.size(0), -1, -1)
+        cls_tokens = self.cls_token.expand(group_input_tokens.size(0), -1, -1)  # B, 1, trans_dim
+        cls_pos = self.cls_pos.expand(group_input_tokens.size(0), -1, -1)  # B, 1, trans_dim
+
         # add pos embedding
-        pos = self.pos_embed(center)
+        pos_tokens = self.pos_embed(center)  # B, G, trans_dim
+
         # final input
-        x = torch.cat((cls_tokens, group_input_tokens), dim=1)
-        pos = torch.cat((cls_pos, pos), dim=1)
+        x = torch.cat((cls_tokens, group_input_tokens), dim=1)  # B, G+1, trans_dim
+        pos = torch.cat((cls_pos, pos_tokens), dim=1)  # B, G+1, trans_dim
+
         # transformer
-        x = self.blocks(x, pos)
-        x = self.norm(x) # * B, G + 1(cls token)(513), C(384)
+        x = self.blocks(x, pos)  # B, G+1, trans_dim
+        x = self.norm(x)  # B, G+1, trans_dim
+
+        # === 🔌 插入你训练好的 Adapter（若存在）===
+        # 训练时 TransformNeck3D 的 in_dim = trans_dim，所以必须在 pool 之前调用
+        if hasattr(self, "transform_neck3d") and self.transform_neck3d is not None:
+            # 兼容 (B,T,C) / (T,C) 的写法，这里 x 是 (B,T,C)
+            x = self.transform_neck3d(x)
+
+        # 输出
         if not self.use_max_pool:
+            # 返回 token 级特征（B, G+1, trans_dim），和 PointLLM 里 point_token_len 对应
             return x
-        concat_f = torch.cat([x[:, 0], x[:, 1:].max(1)[0]], dim=-1).unsqueeze(1) # * concat the cls token and max pool the features of different tokens, make it B, 1, C
-        return concat_f # * B, 1, C(384 + 384)
+
+        # concat(cls, max-pool(tokens)) → (B, 1, 2*trans_dim)
+        pooled = torch.cat([x[:, 0], x[:, 1:].max(1)[0]], dim=-1).unsqueeze(1)
+        return pooled

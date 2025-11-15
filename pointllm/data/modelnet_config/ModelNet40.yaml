@@ -1,5 +1,6 @@
 NAME: ModelNet
-DATA_PATH: data/modelnet40_data
+#DATA_PATH: /Users/zhengwenjie/Documents/personal/paper/ModelNet40_ply
+DATA_PATH: data/ModelNet40
 NUM_CATEGORY: 40
 USE_NORMALS: FALSE
 npoints: 8192

@@ -1,8 +1,6 @@
 #    Copyright 2023 Runsen Xu
 
 from typing import List, Optional, Tuple, Union
-
-import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from .utils import *
@@ -24,7 +22,7 @@ class PointLLMConfig(LlamaConfig):
     model_type = "pointllm"
 
 class PointLLMLlamaModel(LlamaModel):
-    config_class = PointLLMConfig 
+    config_class = PointLLMConfig
 
     def __init__(self, config: LlamaConfig):
         super(PointLLMLlamaModel, self).__init__(config)
@@ -35,14 +33,14 @@ class PointLLMLlamaModel(LlamaModel):
         if self.point_backbone_type == "PointBERT":
             from pointllm.model import PointTransformer
             # address of config file, in the same dir of this file
-            point_bert_config_name = getattr(config, "point_backbone_config_name", "PointTransformer_8192point_2layer") # * default for v1.2, v1.1 uses PointTransformer_base_8192point.yaml
+            point_bert_config_name = getattr(config, "point_backbone_config_name", "PointTransformer_8192point_2layer") # * default for v1.2
             point_bert_config_addr = os.path.join(os.path.dirname(__file__), "pointbert", f"{point_bert_config_name}.yaml")
             print(f"Loading PointBERT config from {point_bert_config_addr}.")
             point_bert_config = cfg_from_yaml_file(point_bert_config_addr)
             if getattr(config, "use_color", False):
                 point_bert_config.model.point_dims = 6
             use_max_pool = getattr(point_bert_config.model, "use_max_pool", False) # * default is false
-            
+
             self.point_backbone = PointTransformer(point_bert_config.model, use_max_pool=use_max_pool)
             logger.info(f"Using {self.point_backbone.point_dims} dim of points.")
 
@@ -50,15 +48,58 @@ class PointLLMLlamaModel(LlamaModel):
                 "point_cloud_dim": point_bert_config.model.point_dims,
                 "backbone_output_dim": point_bert_config.model.trans_dim if not use_max_pool else point_bert_config.model.trans_dim * 2,
                 "project_output_dim": self.config.hidden_size,
-                "point_token_len": point_bert_config.model.num_group + 1 if not use_max_pool else 1, # * number of output features, with cls token
+                "point_token_len": point_bert_config.model.num_group + 1 if not use_max_pool else 1,  # with cls token when not max-pool
                 "mm_use_point_start_end": self.config.mm_use_point_start_end,
                 "projection_hidden_layer": point_bert_config.model.get('projection_hidden_layer', 0),
                 "use_max_pool": use_max_pool
             }
             if point_bert_config.model.get('projection_hidden_layer', 0) > 0:
-                self.point_backbone_config["projection_hidden_dim"] = point_bert_config.model.projection_hidden_dim # a list
-            
+                self.point_backbone_config["projection_hidden_dim"] = point_bert_config.model.projection_hidden_dim  # a list
+
             logger.info(f"Use max pool is {use_max_pool}. Number of point token is {self.point_backbone_config['point_token_len']}.")
+
+            # === [新增] 将你训练好的 TransformNeck3D 适配器挂到 point_backbone 上，并加载 ckpt ===
+            try:
+                from pointllm.model.transform_neck3d import TransformNeck3D
+                neck_in_dim = point_bert_config.model.trans_dim
+                # 创建颈部并挂到 backbone
+                self.point_backbone.transform_neck3d = TransformNeck3D(in_dim=neck_in_dim)
+                logger.info(f"[Adapter] transform_neck3d attached: {self.point_backbone.transform_neck3d}")
+
+                # 从 config 读取 adapter 路径（外部设置 config.point_adapter_ckpt 即可）
+                adapter_ckpt = getattr(self.config, "point_adapter_ckpt", None)
+                logger.info(f"[Adapter] Loading adapter from: {adapter_ckpt}")
+                if adapter_ckpt:
+                    logger.info(f"[Adapter] Loading adapter from: {adapter_ckpt}")
+                    ckpt = torch.load(adapter_ckpt, map_location="cpu", weights_only=False)
+
+                    # 兼容多种保存格式：{'state_dict':...} / {'adapter':...} / 直接 state_dict
+                    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+                        sd = ckpt["state_dict"]
+                    elif isinstance(ckpt, dict) and "adapter" in ckpt:
+                        sd = ckpt["adapter"]
+                    else:
+                        sd = ckpt
+
+                    # 清理常见前缀，映射到 transform_neck3d.*
+                    new_sd = {}
+                    for k, v in sd.items():
+                        k = k.replace("module.", "").replace("student.", "")
+                        if k.startswith("transform_neck3d."):
+                            new_sd[k] = v
+                        elif k.startswith("neck."):
+                            new_sd["transform_neck3d." + k[len("neck."):]] = v
+                        else:
+                            # 如果保存时是裸层名（例如 'mlp.0.weight'），也接到 transform_neck3d 下
+                            if "." in k:
+                                new_sd["transform_neck3d." + k] = v
+
+                    missing, unexpected = self.point_backbone.transform_neck3d.load_state_dict(new_sd, strict=False)
+                    logger.info(f"[Adapter] Loaded into TransformNeck3D. missing={len(missing)}, unexpected={len(unexpected)}")
+                else:
+                    logger.info("[Adapter] config.point_adapter_ckpt is None. Using backbone without adapter.")
+            except Exception as e:
+                logger.warning(f"[Adapter] Skip attaching adapter due to error: {e}")
 
         # * print relevant info with projection layers
         backbone_output_dim = self.point_backbone_config["backbone_output_dim"]
@@ -81,7 +122,7 @@ class PointLLMLlamaModel(LlamaModel):
             self.point_proj = nn.Linear(backbone_output_dim, self.point_backbone_config['project_output_dim'])
         logger.info(f"Point projector output dim: {self.point_backbone_config['project_output_dim']}.")
 
-        self.fix_pointnet = False
+        self.fix_pointnet = getattr(config, "fix_pointnet", False)
         self.fix_llm = False
 
     def load_point_backbone_checkpoint(self, checkpoint_path=None):
@@ -91,6 +132,7 @@ class PointLLMLlamaModel(LlamaModel):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
@@ -110,38 +152,54 @@ class PointLLMLlamaModel(LlamaModel):
         point_backbone_config = getattr(self, 'point_backbone_config', None)
 
         if point_backbone is not None and (input_ids.shape[1] != 1 or self.training) and point_clouds is not None:
-            # * enter when training or the first generation step of inference
-            with torch.no_grad() if self.fix_pointnet else nullcontext():
-                if self.fix_pointnet:
-                    self.point_backbone.eval()
-                if type(point_clouds) is list:
-                    # * variable numbers of points
-                    point_features = []
-                    for point_cloud in point_clouds: # * iterate over batch
-                        point_feature = self.point_backbone(point_cloud.unsqueeze(0))[0]
-                        point_features.append(point_feature)
-                else:
-                    point_features = self.point_backbone(point_clouds)
-
-            if type(point_clouds) is list:
-                point_features = [self.point_proj(point_feature) for point_feature in point_features]
+            # 1) 只在 no_grad 里算 backbone 的原始特征
+            if isinstance(point_clouds, list):
+                raw_point_features = []
+                with torch.no_grad() if self.fix_pointnet else nullcontext():
+                    if self.fix_pointnet:
+                        self.point_backbone.eval()
+                    for point_cloud in point_clouds:
+                        feat = self.point_backbone(point_cloud.unsqueeze(0))[0]  # [N, C]
+                        raw_point_features.append(feat)
             else:
+                with torch.no_grad() if self.fix_pointnet else nullcontext():
+                    if self.fix_pointnet:
+                        self.point_backbone.eval()
+                    raw_point_features = self.point_backbone(point_clouds)  # [B, N, C] or [B, C]
+
+            # 2) 在有梯度的区域内应用 adapter（如果存在）
+            def apply_adapter(feat):
+                neck = getattr(self.point_backbone, "transform_neck3d", None)
+                if neck is not None:
+                    return neck(feat)
+                return feat
+
+            if isinstance(point_clouds, list):
+                point_features = [apply_adapter(f) for f in raw_point_features]
+                # 3) 再过 projector
+                point_features = [self.point_proj(f) for f in point_features]
+            else:
+                point_features = apply_adapter(raw_point_features)
                 point_features = self.point_proj(point_features)
 
-            dummy_point_features = torch.zeros(point_backbone_config['point_token_len'], point_backbone_config['backbone_output_dim'], device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+            dummy_point_features = torch.zeros(
+                point_backbone_config['point_token_len'],
+                self.point_backbone_config["backbone_output_dim"],
+                device=inputs_embeds.device, dtype=inputs_embeds.dtype
+            )
             dummy_point_features = self.point_proj(dummy_point_features)
 
             new_input_embeds = []
             cur_point_idx = 0
-            for cur_input_ids, cur_input_embeds in zip(input_ids, inputs_embeds): # * input_ids: B, L; input_embeds: B, L, C
+            for cur_input_ids, cur_input_embeds in zip(input_ids, inputs_embeds):  # input_ids: B, L; input_embeds: B, L, C
                 if (cur_input_ids == point_backbone_config['point_patch_token']).sum() == 0:
                     # multimodal LLM, but the current sample is not multimodal
-                    cur_input_embeds = cur_input_embeds + (0. * dummy_point_features).sum() # * do nothing
+                    cur_input_embeds = cur_input_embeds + (0. * dummy_point_features).sum()  # do nothing
                     new_input_embeds.append(cur_input_embeds)
                     cur_point_idx += 1
                     continue
                 cur_point_features = point_features[cur_point_idx].to(device=cur_input_embeds.device)
-                num_patches = cur_point_features.shape[0] # * number of point tokens
+                num_patches = cur_point_features.shape[0]  # number of point tokens
                 if point_backbone_config['mm_use_point_start_end']:
                     if (cur_input_ids == point_backbone_config["point_start_token"]).sum() != (cur_input_ids == point_backbone_config["point_end_token"]).sum():
                         raise ValueError("The number of point start tokens and point end tokens should be the same.")
@@ -149,10 +207,20 @@ class PointLLMLlamaModel(LlamaModel):
                     for point_start_token_pos in point_start_tokens:
                         if cur_input_ids[point_start_token_pos + num_patches + 1] != point_backbone_config["point_end_token"]:
                             raise ValueError("The point end token should follow the point start token.")
-                        if orig_embeds_params is not None: # * will not update the original embeddings except for POINT_START_TOKEN and POINT_END_TOKEN
-                            cur_new_input_embeds = torch.cat((cur_input_embeds[:point_start_token_pos].detach(), cur_input_embeds[point_start_token_pos:point_start_token_pos+1], cur_point_features, cur_input_embeds[point_start_token_pos + num_patches + 1:point_start_token_pos + num_patches + 2], cur_input_embeds[point_start_token_pos + num_patches + 2:].detach()), dim=0)
+                        if orig_embeds_params is not None:  # will not update the original embeddings except for POINT_START/END
+                            cur_new_input_embeds = torch.cat((
+                                cur_input_embeds[:point_start_token_pos].detach(),
+                                cur_input_embeds[point_start_token_pos:point_start_token_pos+1],
+                                cur_point_features,
+                                cur_input_embeds[point_start_token_pos + num_patches + 1:point_start_token_pos + num_patches + 2],
+                                cur_input_embeds[point_start_token_pos + num_patches + 2:].detach()
+                            ), dim=0)
                         else:
-                            cur_new_input_embeds = torch.cat((cur_input_embeds[:point_start_token_pos+1], cur_point_features, cur_input_embeds[point_start_token_pos + num_patches + 1:]), dim=0)
+                            cur_new_input_embeds = torch.cat((
+                                cur_input_embeds[:point_start_token_pos+1],
+                                cur_point_features,
+                                cur_input_embeds[point_start_token_pos + num_patches + 1:]
+                            ), dim=0)
                         cur_point_idx += 1
                     new_input_embeds.append(cur_new_input_embeds)
                 else:
@@ -163,9 +231,17 @@ class PointLLMLlamaModel(LlamaModel):
                     if (masked_indices != torch.arange(mask_index_start, mask_index_start+num_patches, device=masked_indices.device, dtype=masked_indices.dtype)).any():
                         raise ValueError("The point patch tokens should be consecutive.")
                     if orig_embeds_params is not None:
-                        cur_new_input_embeds = torch.cat((cur_input_embeds[:mask_index_start].detach(), cur_point_features, cur_input_embeds[mask_index_start+num_patches:].detach()), dim=0)
+                        cur_new_input_embeds = torch.cat((
+                            cur_input_embeds[:mask_index_start].detach(),
+                            cur_point_features,
+                            cur_input_embeds[mask_index_start+num_patches:].detach()
+                        ), dim=0)
                     else:
-                        cur_new_input_embeds = torch.cat((cur_input_embeds[:mask_index_start], cur_point_features, cur_input_embeds[mask_index_start+num_patches:]), dim=0)
+                        cur_new_input_embeds = torch.cat((
+                            cur_input_embeds[:mask_index_start],
+                            cur_point_features,
+                            cur_input_embeds[mask_index_start+num_patches:]
+                        ), dim=0)
                     new_input_embeds.append(cur_new_input_embeds)
                     cur_point_idx += 1
             inputs_embeds = torch.stack(new_input_embeds, dim=0)
@@ -197,14 +273,15 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None, # * control whether to return past_key_values
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        point_clouds: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
+        point_clouds: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -231,8 +308,8 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous() # * B, L, V(32003)
-            shift_labels = labels[..., 1:].contiguous() # * B, L
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
             shift_logits = shift_logits.view(-1, self.config.vocab_size)
@@ -299,7 +376,7 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
 
             point_backbone_config["point_start_token"] = tokenizer.convert_tokens_to_ids([default_point_start_token])[0]
             point_backbone_config["point_end_token"] = tokenizer.convert_tokens_to_ids([default_point_end_token])[0]
-    
+
     def initialize_tokenizer_point_backbone_config(self, tokenizer, device, fix_llm=True):
 
         config = self.config
@@ -308,8 +385,8 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
 
         default_point_patch_token = config.DEFAULT_POINT_PATCH_TOKEN
         point_backbone_config['default_point_patch_token'] = default_point_patch_token
-        tokenizer.add_tokens([default_point_patch_token], special_tokens=True) # * no need to update embed since it will be replaced
-        self.resize_token_embeddings(len(tokenizer)) # ! resize_token_embeddings will make the tokens trainable again
+        tokenizer.add_tokens([default_point_patch_token], special_tokens=True)  # no need to update embed since it will be replaced
+        self.resize_token_embeddings(len(tokenizer))  # resize_token_embeddings will make the tokens trainable again
         point_backbone_config['point_patch_token'] = tokenizer.convert_tokens_to_ids([default_point_patch_token])[0]
 
         if mm_use_point_start_end:
@@ -327,10 +404,8 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
                 input_embeddings = self.get_input_embeddings().weight.data
                 output_embeddings = self.get_output_embeddings().weight.data
 
-                input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
-                    dim=0, keepdim=True)
-                output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
-                    dim=0, keepdim=True)
+                input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+                output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
 
                 input_embeddings[-num_new_tokens:] = input_embeddings_avg
                 output_embeddings[-num_new_tokens:] = output_embeddings_avg
@@ -339,8 +414,8 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
                 for p in self.get_input_embeddings().parameters():
                     p.requires_grad = True
                 if fix_llm:
-                    self.get_model().orig_embeds_params = [self.get_input_embeddings().weight.data.clone().to(device=device)] # * only tuning the new embeddings
-                    for p in self.get_output_embeddings().parameters(): # * the llm head
+                    self.get_model().orig_embeds_params = [self.get_input_embeddings().weight.data.clone().to(device=device)]  # only tuning the new embeddings
+                    for p in self.get_output_embeddings().parameters():  # the llm head
                         p.requires_grad = False
                     print(f"Setting output embeddings fixed and {num_new_tokens} new tokens' input embeddings trainable.")
                 else:

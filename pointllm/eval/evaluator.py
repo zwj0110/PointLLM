@@ -1,6 +1,9 @@
 import argparse
 import json
 import os
+
+import openai
+
 from utils import OpenAIGPT
 from tqdm import tqdm
 from multiprocessing import Pool
@@ -58,6 +61,10 @@ gpt4_close_set_cls_prompt = chatgpt_close_set_cls_prompt
 
 GPT_PRICES = {
     # * check https://openai.com/pricing for updated price
+    "gpt-3.5-turbo": {
+        "price_1k_prompt_tokens": 0.0015,
+        "price_1k_completion_tokens": 0.002
+    },
     "gpt-3.5-turbo-0613": {
         "price_1k_prompt_tokens": 0.0015,
         "price_1k_completion_tokens": 0.002
@@ -182,13 +189,15 @@ class OpenAIOpenFreeFormClsEvaluator():
         model_output = result['model_output']
         messages = [{"role": "user", "content": self.gpt_prompt.format(ground_truth=ground_truth, model_output=model_output)}]
 
-        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False) 
+        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)
 
-        prompt_tokens = gpt_response['usage']['prompt_tokens']
-        completion_tokens = gpt_response['usage']['completion_tokens']
-
-        gpt_response = gpt_response['choices'][0]["message"]['content']
-
+        # prompt_tokens = gpt_response['usage']['prompt_tokens']
+        # completion_tokens = gpt_response['usage']['completion_tokens']
+        #
+        # gpt_response = gpt_response['choices'][0]["message"]['content']
+        prompt_tokens = gpt_response.usage.prompt_tokens
+        completion_tokens = gpt_response.usage.completion_tokens
+        gpt_response = gpt_response.choices[0].message.content
 
         accuracy, cls_result, reason = self.parse_gpt_response_evaluate(gpt_response) # return 0, "INVALID", gpt_response if not valid
 
@@ -229,10 +238,10 @@ class OpenAIOpenFreeFormClsEvaluator():
             self.save_results(is_temp=True)
             exit()
 
-    def parallel_evaluate(self, num_workers=20):
+    def parallel_evaluate(self, num_workers=1):
 
         self.resume_processing()
-        
+
         print('-' * 80)
         print("Starting parallel evaluation...")
         results = self.results
@@ -268,8 +277,11 @@ class OpenAIOpenFreeFormClsEvaluator():
 
         except (Exception, KeyboardInterrupt) as e:
             print(f"Error {e} occurred during parallel evaluation. Saving processed results to temporary file...")
+            import traceback
+            traceback.print_exc()
+            print(f"[!] 并行评估时发生异常，正在保存已经处理的临时结果。")
             self.save_results(is_temp=True)
-            exit()
+            raise
 
     def save_results(self, is_temp=False):
         if is_temp:
@@ -321,12 +333,13 @@ class OpenAIOpenFreeFormClsEvaluator():
 
 
 class OpenAICloseSetClsEvaluator(OpenAIOpenFreeFormClsEvaluator):
-    def __init__(self, inputs, output_dir, output_file, model_type="gpt-3.5-turbo-0613"):
+    def __init__(self, inputs, output_dir, output_file, model_type="gpt-3.5-turbo"):
         super().__init__(inputs, output_dir, output_file, model_type)
         self.gpt_prompt = chatgpt_close_set_cls_prompt if "gpt-3.5" in model_type else gpt4_close_set_cls_prompt
 
         self.invalid_correct_predictions = 0 # * random choice and correct coincidently
-
+        openai.api_key = os.getenv("OPENAI_API_KEY")
+        print("Shell 里读到的 OPENAI_API_KEY:", openai.api_key)
         # * import category names
         try:
             # * load a txt files of category names
@@ -337,6 +350,7 @@ class OpenAICloseSetClsEvaluator(OpenAIOpenFreeFormClsEvaluator):
 
         # * make the prompt
         candidate_lists = [f'{i}: {cat}' for i, cat in enumerate(self.candidate_lists_names)]
+        print(candidate_lists)
         self.num_categories = len(candidate_lists)
         self.candidate_lists = '\n'.join(candidate_lists)
         self.gpt_prompt = self.gpt_prompt.format(num_categories=self.num_categories, candidate_lists=self.candidate_lists) + "{model_output}\nOutput: "
@@ -421,13 +435,16 @@ class OpenAICloseSetClsEvaluator(OpenAIOpenFreeFormClsEvaluator):
         model_output = result['model_output']
 
         messages = [{"role": "user", "content": self.gpt_prompt.format(model_output=model_output)}]
-        
-        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False) 
-
-        prompt_tokens = gpt_response['usage']['prompt_tokens']
-        completion_tokens = gpt_response['usage']['completion_tokens']
-
-        gpt_response = gpt_response['choices'][0]["message"]['content']
+        print(f"[DEBUG-eval_result] 准备向 GPT 发送请求，object_id={object_id}, prompt 头部：{messages[0]['content'][:50]}...")
+        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)
+        print(f"[DEBUG-eval_result] 已收到 GPT 返回，object_id={object_id}")
+        # prompt_tokens = gpt_response['usage']['prompt_tokens']
+        # completion_tokens = gpt_response['usage']['completion_tokens']
+        #
+        # gpt_response = gpt_response['choices'][0]["message"]['content']
+        prompt_tokens = gpt_response.usage.prompt_tokens
+        completion_tokens = gpt_response.usage.completion_tokens
+        gpt_response = gpt_response.choices[0].message.content
 
         accuracy, cls_result, cls_label, reason = self.parse_gpt_response_evaluate(gpt_response, ground_truth) # return 0, "INVALID", gpt_response if not valid
 
@@ -440,9 +457,11 @@ class OpenAICloseSetClsEvaluator(OpenAIOpenFreeFormClsEvaluator):
         print('-' * 80)
         print("Starting single-thread evaluation...")
         results = self.results
+        print(f"[DEBUG-evaluate] 进入 evaluate()，当前 self.results 长度 = {len(results)}")
 
         try:
-            for result in tqdm(results):  
+            for idx,result in enumerate(results):
+                print(f"[DEBUG] 开始处理第 {idx + 1} / {len(results)} 条样本，对象 ID = {result['object_id']}")
                 object_id, model_output, ground_truth, accuracy, cls_result, cls_label, reason, ground_truth_label, prompt_tokens, completion_tokens = self.evaluate_result(result)
                 self.correct_predictions += accuracy
                 self.total_predictions += 1
@@ -652,13 +671,19 @@ class OpenAIObjectCaptioningEvaluator(OpenAIOpenFreeFormClsEvaluator):
         model_output = result['model_output']
 
         messages = [{"role": "user", "content": self.gpt_prompt.format(ground_truth=ground_truth, model_output=model_output)}]
-        
-        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False) 
 
-        prompt_tokens = gpt_response['usage']['prompt_tokens']
-        completion_tokens = gpt_response['usage']['completion_tokens']
+        print(f"[DEBUG-eval_result] 准备向 GPT 发送请求，object_id={object_id}, prompt 头部：{messages[0]['content'][:50]}...")
+        gpt_response = self.openaigpt.safe_chat_complete(messages, content_only=False)
+        # DEBUG: 收到 GPT 返回
+        print(f"[DEBUG-eval_result] 已收到 GPT 返回，object_id={object_id}")
 
-        gpt_response = gpt_response['choices'][0]["message"]['content']
+        # prompt_tokens = gpt_response['usage']['prompt_tokens']
+        # completion_tokens = gpt_response['usage']['completion_tokens']
+        #
+        # gpt_response = gpt_response['choices'][0]["message"]['content']
+        prompt_tokens = gpt_response.usage.prompt_tokens
+        completion_tokens = gpt_response.usage.completion_tokens
+        gpt_response = gpt_response.choices[0].message.content
 
         gpt_score, reason = self.parse_gpt_response_evaluate(gpt_response, ground_truth) # return 0, "INVALID", gpt_response if not valid
 
@@ -671,9 +696,11 @@ class OpenAIObjectCaptioningEvaluator(OpenAIOpenFreeFormClsEvaluator):
         print('-' * 80)
         print("Starting single-thread evaluation...")
         results = self.results
+        print(f"[DEBUG-init] 总共读到了 {len(self.results)} 条待评估样本")
 
         try:
-            for result in tqdm(results):  
+            for idx, result in enumerate(results):
+                print(f"[DEBUG] 开始处理第 {idx + 1} / {len(results)} 条样本，对象 ID = {result['object_id']}")
                 object_id, model_output, ground_truth, gpt_score, reason, prompt_tokens, completion_tokens = self.evaluate_result(result)
 
                 self.total_scores += gpt_score if gpt_score != -1 else 0
@@ -703,7 +730,7 @@ class OpenAIObjectCaptioningEvaluator(OpenAIOpenFreeFormClsEvaluator):
             self.save_results(is_temp=True)
             exit()
     
-    def parallel_evaluate(self, num_workers=20):
+    def parallel_evaluate(self, num_workers=1):
 
         self.resume_processing()
         
@@ -789,8 +816,8 @@ class OpenAIObjectCaptioningEvaluator(OpenAIOpenFreeFormClsEvaluator):
         self.print_costs()
 
 
-def start_evaluation(results, output_dir, output_file, eval_type="open-free-form-classification", model_type="gpt-3.5-turbo-0613",
-                        parallel=True, num_workers=20):
+def start_evaluation(results, output_dir, output_file, eval_type, model_type,
+                        parallel=True, num_workers=10):
     """
     Args:
         results: dict or file path to the json file containing the dict
@@ -810,8 +837,10 @@ def start_evaluation(results, output_dir, output_file, eval_type="open-free-form
         raise NotImplementedError(f"eval_type {eval_type} not supported.")
 
     if parallel:
+        print("parallel run")
         evaluator.parallel_evaluate(num_workers=num_workers)
     else:
+        print("no parallel run")
         evaluator.evaluate()
 
 
@@ -821,9 +850,9 @@ if __name__ == "__main__":
     parser.add_argument("--results_path", type=str, \
                         default="", help="Path to the results file.")
     parser.add_argument("--output_dir", type=str, default=None, help="Path to the output directory.")
-    parser.add_argument("--model_type", type=str, default="gpt-4-0613", choices=["gpt-3.5-turbo-0613", "gpt-3.5-turbo-1106", "gpt-4-0613", "gpt-4-1106-preview"], help="Type of the model used to evaluate.")
+    parser.add_argument("--model_type", type=str, default="gpt-4-0613", choices=["gpt-3.5-turbo","gpt-3.5-turbo-0613", "gpt-3.5-turbo-1106", "gpt-4-0613", "gpt-4-1106-preview"], help="Type of the model used to evaluate.")
     parser.add_argument("--parallel", default=True, action="store_true", help="Whether to use parallel evaluation.")
-    parser.add_argument("--num_workers", type=int, default=15, help="Number of workers to use for parallel evaluation.")
+    parser.add_argument("--num_workers", type=int, default=10, help="Number of workers to use for parallel evaluation.")
     parser.add_argument("--eval_type", type=str, choices=["modelnet-close-set-classification", "open-free-form-classification", "object-captioning"], default="object-captioning")
 
     args = parser.parse_args()
@@ -839,5 +868,5 @@ if __name__ == "__main__":
         exit()
 
     start_evaluation(results=args.results_path, output_dir=args.output_dir, output_file=output_file, eval_type=args.eval_type, model_type=args.model_type, 
-                        parallel=args.parallel, num_workers=args.num_workers)
+                        parallel=args.parallel,num_workers=args.num_workers)
     

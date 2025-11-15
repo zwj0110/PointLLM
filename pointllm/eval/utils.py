@@ -10,7 +10,7 @@ def retry_with_exponential_backoff(
     jitter: bool = True,
     max_retries: int = 40,
     max_delay: int = 30,
-    errors: tuple = (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.Timeout),
+    errors: tuple = (openai.OpenAIError),
 ):
     """Retry a function with exponential backoff."""
     def wrapper(*args, **kwargs):
@@ -35,7 +35,7 @@ def retry_with_exponential_backoff(
     return wrapper
 
 class OpenAIGPT():
-    def __init__(self, model="gpt-3.5-turbo-0613", temperature=1, top_p=1, max_tokens=2048, **kwargs) -> None:
+    def __init__(self, model="gpt-3.5-turbo", temperature=1, top_p=1, max_tokens=2048, **kwargs) -> None:
         setup_openai(model)
         self.default_chat_parameters = {
             "model": model, 
@@ -51,7 +51,7 @@ class OpenAIGPT():
         if len(kwargs) > 0:
             chat_parameters.update(**kwargs)
 
-        response = openai.ChatCompletion.create(
+        response = openai.chat.completions.create(
             messages=messages,
             **chat_parameters
         )
@@ -65,5 +65,12 @@ def setup_openai(model_name):
     # Setup OpenAI API Key
     print("[OPENAI] Setting OpenAI api_key...")
     openai.api_key = os.getenv('OPENAI_API_KEY')
+    try:
+        _ = openai.models.list()
+        print("[OpenAIGPT] API Key 验证通过。")
+    except openai.OpenAIError as e:
+        raise RuntimeError(f"[OpenAIGPT] 验证失败：AuthenticationError，Key 无效！\n{e}")
+    except Exception as e:
+        raise RuntimeError(f"[OpenAIGPT] 验证 Key 时发生未知错误：{e}")
     print(f"[OPENAI] OpenAI organization: {openai.organization}")
     print(f"[OPENAI] Using MODEL: {model_name}")
