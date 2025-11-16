@@ -12,8 +12,8 @@ class JointFeatureAlignmentTrainer:
             "mps" if torch.backends.mps.is_available() else "cpu")
         self.teacher.to(self.device)
         self.student.to(self.device)
-        self.train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
-        self.val_loader = DataLoader(val_dataset, batch_size=2) if val_dataset else None
+        self.train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
+        self.val_loader = DataLoader(val_dataset, batch_size=8) if val_dataset else None
         self.opt = torch.optim.Adam(self.student.parameters(), lr=lr)
         self.save_dir = save_dir
         self.use_cosine = use_cosine

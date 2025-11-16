@@ -39,7 +39,7 @@ student.transform_neck3d = TransformNeck3D(in_dim=cfg.model.trans_dim)
 num_pts = getattr(cfg.model, 'num_points', 8192)
 train_set = ModelNet40DistillDataset(
     original_root="./data/modelnet40_train_all_8192",
-    compressed_root="./data/bench_surface_dense_r02_train",
+    compressed_root="./data/bench_surface_dense_r04_train",
     split="train",
     num_points=num_pts,
     cache_npy=True,
@@ -48,7 +48,7 @@ train_set = ModelNet40DistillDataset(
 
 val_set = ModelNet40DistillDataset(
     original_root="./data/modelnet40_test_all_8192",
-    compressed_root="./data/bench_surface_dense_r02_test",
+    compressed_root="./data/bench_surface_dense_r04_test",
     split="test",
     num_points=num_pts,
     cache_npy=True,
@@ -64,7 +64,7 @@ trainer = JointFeatureAlignmentTrainer(
     train_dataset=train_set,
     val_dataset=val_set,
     lr=3e-4,
-    save_dir="./output_r02"
+    save_dir="./output_r04"
 )
 
-trainer.train(num_epochs=15, save_interval=5)
+trainer.train(num_epochs=5, save_interval=1)
