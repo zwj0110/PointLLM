@@ -69,10 +69,13 @@ class Block(nn.Module):
 
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        self.adapter = None
 
     def forward(self, x):
         x = x + self.drop_path(self.attn(self.norm1(x)))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+        if self.adapter is not None:
+            x = self.adapter(x)  # x: [B, G+1,
         return x
 
 
@@ -144,9 +147,12 @@ class PointTransformer(nn.Module):
     def load_checkpoint(self, bert_ckpt_path):
         ckpt = torch.load(bert_ckpt_path, map_location='cpu', weights_only=False)
         state_dict = OrderedDict()
+
+        # ✅ 从 transformer_q.* 拿 backbone 参数
         for k, v in ckpt['state_dict'].items():
-            if k.startswith('module.point_encoder.'):
-                state_dict[k.replace('module.point_encoder.', '')] = v
+            if k.startswith('transformer_q.'):
+                new_k = k.replace('transformer_q.', '')
+                state_dict[new_k] = v
 
         incompatible = self.load_state_dict(state_dict, strict=False)
 
@@ -163,8 +169,10 @@ class PointTransformer(nn.Module):
                 logger='Transformer'
             )
         if not incompatible.missing_keys and not incompatible.unexpected_keys:
-            # * print successful loading
-            print_log("PointBERT's weights are successfully loaded from {}".format(bert_ckpt_path), logger='Transformer')
+            print_log(
+                "PointBERT's weights are successfully loaded from {}".format(bert_ckpt_path),
+                logger='Transformer'
+            )
 
     def forward(self, pts):
         # divide the point cloud in the same form. This is important
