@@ -3,7 +3,7 @@ import open3d as o3d
 
 # data/converted_xyz_structured/.cache_points/test_test_guitar_0156_8192_g1_h0.npy
 # data/bench_surface_dense_r01_new/.cache_points/test_test_guitar_0156_8192_g1_h0.npy
-points = np.load("data/bench_surface_dense_r05_new/.cache_points/test_test_guitar_0158_8192_g1_h0.npy")
+points = np.load("data/bench_surface_dense_r04_test/.cache_points/test_test_bathtub_0119_8192_g1_h0.npy")
 
 
 pcd = o3d.geometry.PointCloud()
