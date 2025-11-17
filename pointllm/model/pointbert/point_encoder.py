@@ -100,8 +100,8 @@ class Block(nn.Module):
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
         # 如果有 adapter，则再走一层
-        # if self.adapter is not None:
-        #     x = self.adapter(x)  # [B, G+1, C]
+        if self.adapter is not None:
+            x = self.adapter(x)  # [B, G+1, C]
 
         return x
 

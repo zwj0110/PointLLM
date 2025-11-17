@@ -47,8 +47,7 @@ PROMPT_LISTS = [
 ]
 
 # ★★★ 这里填你训练好的 adapter ckpt 路径 ★★★
-#ADAPTER_CKPT = "./output_pointbert_r01/student_adapter_final.pth"
-ADAPTER_CKPT = None
+ADAPTER_CKPT = "./output_pointbert_r02/student_adapter_final.pth"
 
 def init_model(args):
     # Model
@@ -303,42 +302,38 @@ def main(args):
         )
 
         # 2) 模型
+        # 2) 模型
         model, tokenizer, conv = init_model(args)
-        # core = model.get_model()
-        #
-        # # ★★★ 在这里插上你训练好的 PointBERT adapter ★★★
-        # if hasattr(core, "point_backbone"):
-        #     pt = core.point_backbone
-        #     print("[INFO] point_backbone type:", type(pt))
-        #
-        #     if hasattr(pt, "init_adapters"):
-        #         pt.init_adapters(
-        #             start_layer=pt.depth // 2,  # 和训练脚本一致：后半层
-        #             hidden_dim=256,
-        #             dropout=0.1,
-        #             scale=1.0,
-        #         )
-        #         print("[INFO] init_adapters() called on point_backbone.")
-        #     else:
-        #         print("[WARN] point_backbone has no method 'init_adapters'.")
-        #
-        #     if hasattr(pt, "load_adapter_checkpoint") and ADAPTER_CKPT is not None:
-        #         pt.load_adapter_checkpoint(
-        #             ADAPTER_CKPT,
-        #             only_adapter=True,
-        #         )
-        #         print(f"[INFO] Adapter checkpoint loaded from {ADAPTER_CKPT}")
-        #     else:
-        #         print("[WARN] cannot load adapter checkpoint.")
-        # else:
-        #     print("[WARN] core has no attribute 'point_backbone', cannot attach adapter.")
         core = model.get_model()
 
-        # 不使用任何 adapter，直接用原始 point_backbone
+        # ========== 在 PointBERT backbone 上挂 Block-level adapter，并加载训练好的权重 ==========
         if hasattr(core, "point_backbone"):
-            print("[INFO] Using point_backbone without adapters.")
+            pt = core.point_backbone
+            print("[INFO] point_backbone type:", type(pt))
+
+            # 1) 先在后半部分 Block 上创建 adapter（结构是 TransformNeck3D）
+            if hasattr(pt, "init_adapters"):
+                pt.init_adapters(
+                    start_layer=pt.depth // 2,  # ★ 和你训练脚本一致：从中间往后挂
+                    hidden_dim=256,  # ★ 要和训练 TransformNeck3D 时的 hidden_dim 一致
+                    dropout=0.1,
+                    scale=1.0,  # ★ 训练时如果用 0.1，就改成 0.1
+                )
+                print("[INFO] init_adapters() called on point_backbone.")
+            else:
+                print("[WARN] point_backbone has no method 'init_adapters'.")
+
+            # 2) 加载你训练好的 adapter 权重（只加载带 'adapter' 的参数，不动主干）
+            if ADAPTER_CKPT is not None and hasattr(pt, "load_adapter_checkpoint"):
+                pt.load_adapter_checkpoint(
+                    ADAPTER_CKPT,
+                    only_adapter=True,  # ✅ 只加载 adapter.*，防止改动 backbone 权重
+                )
+                print(f"[INFO] Adapter checkpoint loaded from {ADAPTER_CKPT}")
+            else:
+                print("[INFO] ADAPTER_CKPT is None 或 PointTransformer 没有 load_adapter_checkpoint，按无 adapter 运行。")
         else:
-            print("[WARN] core has no attribute 'point_backbone'.")
+            print("[WARN] core has no attribute 'point_backbone', cannot attach adapter.")
 
         # 3) 打印参数统计
         rows, total_params = params_by_module(core)
