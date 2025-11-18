@@ -47,7 +47,8 @@ PROMPT_LISTS = [
 ]
 
 # ★★★ 这里填你训练好的 adapter ckpt 路径 ★★★
-ADAPTER_CKPT = "./output_pointbert_r02/student_adapter_final.pth"
+ADAPTER_CKPT = "./output_transformer_adapter_r01/student_adapter_final.pth"
+
 
 def init_model(args):
     # Model
@@ -66,12 +67,10 @@ def init_model(args):
         device = "cpu"
     print(f"[INFO] Using device: {device}")
 
-    # tokenizer（如果你之前用 use_fast=False，也可以带上）
+    # tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # dtype 选择：
-    # - CUDA 上用 bfloat16（和原始脚本一致）
-    # - M1(mps) / cpu 上用 float32，最稳
+    # dtype 选择
     if device == "cuda":
         load_dtype = torch.bfloat16
     else:
@@ -90,46 +89,6 @@ def init_model(args):
     conv = conv_templates[conv_mode].copy()
 
     return model, tokenizer, conv
-
-# def init_model(args):
-#     disable_torch_init()
-#     model_name = os.path.expanduser(args.model_name)
-#     print(f"[INFO] Model name: {os.path.basename(model_name)}")
-#
-#     # 设备选择：M1 上优先 mps，其次 cuda，否则 cpu
-#     device = 'mps' if torch.backends.mps.is_available() else \
-#              'cuda' if torch.cuda.is_available() else 'cpu'
-#     print(f"[INFO] Using device: {device}")
-#
-#     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
-#
-#     # 先取 config，写入自定义字段
-#     cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-#     # cfg.point_backbone = "PointBERT"
-#     # cfg.point_backbone_ckpt = None
-#     # cfg.mm_use_point_start_end = False
-#     # cfg.fix_pointnet = True
-#
-#     # ★ 关键：只有 cuda 用 fp16，mps / cpu 用 fp32
-#     if device == "cuda":
-#         load_dtype = torch.float16
-#     else:
-#         load_dtype = torch.float32
-#
-#     model = PointLLMLlamaForCausalLM.from_pretrained(
-#         model_name,
-#         config=cfg,
-#         low_cpu_mem_usage=False,
-#         torch_dtype=load_dtype,
-#         trust_remote_code=True,
-#     ).to(device)
-#
-#     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
-#
-#     conv_mode = "vicuna_v1_1"
-#     conv = conv_templates[conv_mode].copy()
-#     return model, tokenizer, conv
-
 
 
 def load_dataset(config_path, split, subset_nums, use_color):
@@ -184,7 +143,7 @@ def generate_outputs(
             top_k=top_k,
             max_length=max_length,
             top_p=top_p,
-            stopping_criteria=[stopping_criteria]) # * B, L'
+            stopping_criteria=[stopping_criteria])  # * B, L'
 
     input_token_len = input_ids.shape[1]
     n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
@@ -229,23 +188,24 @@ def start_generation(
     prompt = conv.get_prompt()
     inputs = tokenizer([prompt])
 
-    input_ids_ = torch.as_tensor(inputs.input_ids).to('mps') # * tensor of 1, L
+    # TODO: 这里你实际用的 device（cuda/mps）要和上面保持一致
+    input_ids_ = torch.as_tensor(inputs.input_ids).to('mps')  # * tensor of 1, L
 
     stopping_criteria = KeywordsStoppingCriteria([stop_str], tokenizer, input_ids_)
 
     responses = []
     print("[DEBUG] enter start_generation, about to iterate dataloader...")
     for batch in tqdm(dataloader):
-        point_clouds = batch["point_clouds"].to('mps').to(model.dtype) # * tensor of B, N, C(3)
+        point_clouds = batch["point_clouds"].to('mps').to(model.dtype)  # * tensor of B, N, C(3)
         labels = batch["labels"]
         label_names = batch["label_names"]
         indice = batch["indice"]
 
         batchsize = point_clouds.shape[0]
 
-        input_ids = input_ids_.repeat(batchsize, 1) # * tensor of B, L
+        input_ids = input_ids_.repeat(batchsize, 1)  # * tensor of B, L
 
-        outputs = generate_outputs(model, tokenizer, input_ids, point_clouds, stopping_criteria) # List of str, length is B
+        outputs = generate_outputs(model, tokenizer, input_ids, point_clouds, stopping_criteria)  # List of str, length is B
         # saving results
         for index, output, label, label_name in zip(indice, outputs, labels, label_names):
             responses.append({
@@ -317,7 +277,7 @@ def main(args):
                     start_layer=pt.depth // 2,  # ★ 和你训练脚本一致：从中间往后挂
                     hidden_dim=256,  # ★ 要和训练 TransformNeck3D 时的 hidden_dim 一致
                     dropout=0.1,
-                    scale=1.0,  # ★ 训练时如果用 0.1，就改成 0.1
+                    scale=0.1,  # ★ 训练时如果用 0.1，就改成 0.1
                 )
                 print("[INFO] init_adapters() called on point_backbone.")
             else:
@@ -394,7 +354,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        default="RunsenXu/PointLLM_7B_v1.2",
+        default="RunsenXu_graspnet_r02_pointbert_adapter/PointLLM_7B_v1.2",
     )
 
     # dataset

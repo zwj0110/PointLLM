@@ -1,6 +1,7 @@
 #    Copyright 2023 Runsen Xu
 
 from typing import List, Optional, Tuple, Union
+import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from .utils import *
@@ -11,12 +12,12 @@ from transformers import AutoConfig, AutoModelForCausalLM, \
                          LlamaConfig, LlamaModel, LlamaForCausalLM
 
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-
 import os
 
 # * add logger
 import logging
 logger = logging.getLogger(__name__)
+
 
 class PointLLMConfig(LlamaConfig):
     model_type = "pointllm"
@@ -58,7 +59,7 @@ class PointLLMLlamaModel(LlamaModel):
             )
             logger.info(f"Using {self.point_backbone.point_dims} dim of points.")
 
-            # ===== PointBackbone 配置（保持原版逻辑，不启用任何 adapter）=====
+            # ===== PointBackbone 配置 =====
             self.point_backbone_config = {
                 "point_cloud_dim": point_bert_config.model.point_dims,
                 "backbone_output_dim": (
@@ -95,7 +96,7 @@ class PointLLMLlamaModel(LlamaModel):
             f"Use {self.point_backbone_config['projection_hidden_layer']} projection hiddent layers."
         )
 
-        # ===== Point Projector（保持原版，仅做线性映射，不加 adapter）=====
+        # ===== Point Projector（线性/MLP）=====
         if self.point_backbone_config["projection_hidden_layer"] > 0:
             # 多层 MLP projector
             projection_layers = []
@@ -123,6 +124,8 @@ class PointLLMLlamaModel(LlamaModel):
         logger.info(
             f"Point projector output dim: {self.point_backbone_config['project_output_dim']}."
         )
+
+
 
         self.fix_pointnet = getattr(config, "fix_pointnet", False)
         self.fix_llm = False
@@ -155,30 +158,34 @@ class PointLLMLlamaModel(LlamaModel):
         point_backbone = getattr(self, "point_backbone", None)
         point_backbone_config = getattr(self, "point_backbone_config", None)
 
-        # ===== 仅使用原始 PointBERT + projector，不走任何 adapter =====
+        # ===== PointBERT + projector + projector adapter =====
         if (
             point_backbone is not None
             and (input_ids.shape[1] != 1 or self.training)
             and point_clouds is not None
         ):
-            # 1) 提取点云特征（根据 fix_pointnet 决定是否 no_grad）
+            # 1) 提取点云特征
             if isinstance(point_clouds, list):
                 raw_point_features = []
                 with torch.no_grad() if self.fix_pointnet else nullcontext():
                     if self.fix_pointnet:
                         self.point_backbone.eval()
                     for point_cloud in point_clouds:
-                        # point_backbone 返回 [B, ..., C]，这里取 batch 维 0
-                        feat = self.point_backbone(point_cloud.unsqueeze(0))[0]
+                        feat = self.point_backbone(point_cloud.unsqueeze(0))[0]  # [N, C]
                         raw_point_features.append(feat)
-                # list 情况下逐个过 projector
-                point_features = [self.point_proj(f) for f in raw_point_features]
+
+                # list 情况下逐个 projector + adapter
+                point_features = []
+                for f in raw_point_features:
+                    pf = self.point_proj(f)             # [N, D]
+                    point_features.append(pf)
             else:
                 with torch.no_grad() if self.fix_pointnet else nullcontext():
                     if self.fix_pointnet:
                         self.point_backbone.eval()
                     raw_point_features = self.point_backbone(point_clouds)  # [B, N, C] or [B, C]
-                point_features = self.point_proj(raw_point_features)
+
+                point_features = self.point_proj(raw_point_features)        # [B, N, D] or [B, D]
 
             # 2) dummy_point_features：用于确保图结构正确（与原版逻辑一致）
             dummy_point_features = torch.zeros(
@@ -316,7 +323,6 @@ class PointLLMLlamaModel(LlamaModel):
         )
 
 
-
 class PointLLMLlamaForCausalLM(LlamaForCausalLM):
     config_class = PointLLMConfig
 
@@ -340,7 +346,7 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None, # * control whether to return past_key_values
+        use_cache: Optional[bool] = None,  # * control whether to return past_key_values
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -415,6 +421,9 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
         )
         return model_inputs
 
+    # ===== tokenizer + point token 初始化部分保持不变 =====
+    # （下面内容与你给的一致，我就不再改动，只是原样保留）
+
     def initialize_tokenizer_point_backbone_config_wo_embedding(self, tokenizer):
         # * called when stage2 or inference or inference without pre-training, assume tokenizer has point tokens
         config = self.config
@@ -486,6 +495,7 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
                     for p in self.get_output_embeddings().parameters():
                         p.requires_grad = True
                     print("Setting output embeddings and all input embeddings trainable.")
+
 
 AutoConfig.register("pointllm", PointLLMConfig)
 AutoModelForCausalLM.register(PointLLMConfig, PointLLMLlamaForCausalLM)

@@ -8,7 +8,7 @@ from .dvae import Group
 from .dvae import Encoder
 from .logger import print_log
 from .checkpoint import get_missing_parameters_message, get_unexpected_parameters_message
-from ..transform_neck3d import TransformNeck3D  # ★ 你的 adapter 类
+from ..transform_neck3d import TransformNeck3D  # ★ Adapter 类
 
 
 class Mlp(nn.Module):
@@ -65,15 +65,38 @@ class Attention(nn.Module):
 
 
 class Block(nn.Module):
+    """
+    单个 Transformer Block
+
+    结构（pre-norm）：
+
+        x ---------------> + -----------------> x
+           |            /                       ^
+           |           /                        |
+        LayerNorm   Multi-head Attn
+                       |
+                     Adapter_attn (可选)
+
+        x ---------------> + -----------------> x
+           |            /
+           |           /
+        LayerNorm       FFN
+                         |
+                     Adapter_ffn (可选)
+
+    对应你发的图：Adapter 挂在 attention / FFN 之后，
+    再和原始残差相加。
+    """
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None,
                  drop=0., attn_drop=0., drop_path=0., act_layer=nn.GELU,
                  norm_layer=nn.LayerNorm):
         super().__init__()
         self.norm1 = norm_layer(dim)
+        self.norm2 = norm_layer(dim)
 
         # drop path for stochastic depth
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
+
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(
             in_features=dim,
@@ -91,17 +114,24 @@ class Block(nn.Module):
             proj_drop=drop,
         )
 
-        # ★ Block 级别 adapter（训练时就是挂在这里）
-        self.adapter: nn.Module | None = None
+        # ★ 两个子层上的 Adapter（注意：默认是 None，外面再 init）
+        self.attn_adapter: nn.Module | None = None
+        self.ffn_adapter: nn.Module | None = None
 
     def forward(self, x):
-        # 标准 Transformer block
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        # ===== Self-Attention 子层 =====
+        attn_out = self.attn(self.norm1(x))          # [B, N, C]
+        # 图上：Multi-head attention -> FF layer(投影) -> Adapter -> Residual
+        if self.attn_adapter is not None:
+            # TransformNeck3D 内部已经带 residual：y = x + scale * f(x)
+            attn_out = self.attn_adapter(attn_out)   # [B, N, C]
+        x = x + self.drop_path(attn_out)
 
-        # 如果有 adapter，则再走一层
-        if self.adapter is not None:
-            x = self.adapter(x)  # [B, G+1, C]
+        # ===== FFN 子层 =====
+        ffn_out = self.mlp(self.norm2(x))            # [B, N, C]
+        if self.ffn_adapter is not None:
+            ffn_out = self.ffn_adapter(ffn_out)      # [B, N, C]
+        x = x + self.drop_path(ffn_out)
 
         return x
 
@@ -181,10 +211,10 @@ class PointTransformer(nn.Module):
 
         self.norm = nn.LayerNorm(self.trans_dim)
 
-        # （可选）全局 neck adapter：如果你不想用，可以不理它
+        # ★ 全局 projector adapter（PointBERT student 里用）
         self.transform_neck3d: nn.Module | None = None
 
-    # ========== Adapter 初始化：和你训练脚本保持一致 ==========
+    # ========== Block Adapter 初始化：在每个 Block 的 attn / ffn 子层挂 adapter ==========
     def init_adapters(
             self,
             start_layer: int | None = None,
@@ -193,38 +223,78 @@ class PointTransformer(nn.Module):
             scale: float = 0.1,
     ):
         """
-        在指定层之后的 Block 上挂 TransformNeck3D。
+        在指定层之后的 Block 上挂 TransformNeck3D 作为 Houlsby-style adapter。
 
         默认从 depth // 2 开始挂（后半部分）。
         """
         if start_layer is None:
             start_layer = self.depth // 2
 
-        # ★ 从已有参数里拿当前 backbone 的 device（mps / cuda / cpu）
         device = next(self.parameters()).device
 
         for layer_id, block in enumerate(self.blocks.blocks):
             if layer_id >= start_layer:
-                if block.adapter is None:
-                    block.adapter = TransformNeck3D(
+                if block.attn_adapter is None:
+                    block.attn_adapter = TransformNeck3D(
                         in_dim=self.trans_dim,
                         hidden_dim=hidden_dim,
                         dropout=dropout,
                         scale=scale,
-                    ).to(device)  # ★ 关键：让 adapter 跟 backbone 在同一个 device 上
+                    ).to(device)
+                if block.ffn_adapter is None:
+                    block.ffn_adapter = TransformNeck3D(
+                        in_dim=self.trans_dim,
+                        hidden_dim=hidden_dim,
+                        dropout=dropout,
+                        scale=scale,
+                    ).to(device)
+
                 print_log(
-                    f"[PointTransformer] Attach adapter to block {layer_id}",
+                    f"[PointTransformer] Attach adapters to block {layer_id} "
+                    f"(attn_adapter & ffn_adapter).",
                     logger="Transformer",
                 )
 
-    # ========== 加载 adapter 参数（只加载带 'adapter' 的 key） ==========
+    # ========== Projector Adapter 初始化 ==========
+    def init_projector_adapter(
+        self,
+        hidden_dim: int = 256,
+        dropout: float = 0.1,
+        scale: float = 0.1,
+    ):
+        """
+        在 pooled 全局特征后挂一个 TransformNeck3D，作为 projector adapter。
+
+        - 如果 use_max_pool=True，则 pooled 维度是 2 * trans_dim
+        - 否则返回 token 级特征时，可以把 in_dim 设为 trans_dim（如果你想在 token 上做）
+        """
+        device = next(self.parameters()).device
+        if self.use_max_pool:
+            in_dim = self.trans_dim * 2
+        else:
+            in_dim = self.trans_dim
+
+        self.transform_neck3d = TransformNeck3D(
+            in_dim=in_dim,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            scale=scale,
+        ).to(device)
+
+        print_log(
+            "[Student] Attach global TransformNeck3D as projector adapter.",
+            logger="Transformer",
+        )
+
+    # ========== 加载 adapter 参数（Block + Projector） ==========
     def load_adapter_checkpoint(self, adapter_ckpt_path: str, only_adapter: bool = True):
         """
         从训练好的 PointBERT student checkpoint 里加载 adapter 参数。
 
         Args:
             adapter_ckpt_path: 训练脚本保存的 student ckpt 路径
-            only_adapter:      True 时仅加载包含 'adapter' 的参数
+            only_adapter:      True 时仅加载 adapter 参数
+                               （blocks.*.attn_adapter / ffn_adapter / transform_neck3d）
         """
         if not os.path.isfile(adapter_ckpt_path):
             print_log(
@@ -242,7 +312,11 @@ class PointTransformer(nn.Module):
             state_dict = ckpt
 
         if only_adapter:
-            state_dict = {k: v for k, v in state_dict.items() if "adapter" in k}
+            state_dict = {
+                k: v
+                for k, v in state_dict.items()
+                if ("adapter" in k) or ("transform_neck3d" in k)
+            }
 
         incompatible = self.load_state_dict(state_dict, strict=False)
 
@@ -318,12 +392,11 @@ class PointTransformer(nn.Module):
         x = self.blocks(x, pos)  # [B, G+1, trans_dim]
         x = self.norm(x)         # [B, G+1, trans_dim]
 
-        # 可选的全局 neck adapter（不是你这次训练那套，可以先不启用）
-        if self.transform_neck3d is not None:
-            x = self.transform_neck3d(x)
-
+        # ★ 全局 projector adapter：对 pooled 特征做一个 TransformNeck3D
         if not self.use_max_pool:
             # 返回 token 级特征给 PointLLM 做 point_token_len 对齐
+            if self.transform_neck3d is not None:
+                x = self.transform_neck3d(x)
             return x  # [B, G+1, trans_dim]
 
         # 用 cls 和 token max-pool 拼接成全局特征
@@ -331,5 +404,8 @@ class PointTransformer(nn.Module):
             [x[:, 0], x[:, 1:].max(1)[0]],
             dim=-1
         ).unsqueeze(1)  # [B, 1, 2*trans_dim]
+
+        if self.transform_neck3d is not None:
+            pooled = self.transform_neck3d(pooled)  # [B, 1, 2*trans_dim]
 
         return pooled
