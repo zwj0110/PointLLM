@@ -188,12 +188,6 @@ class PointTransformer(nn.Module):
         x = self.blocks(x, pos)  # B, G+1, trans_dim
         x = self.norm(x)  # B, G+1, trans_dim
 
-        # === 🔌 插入你训练好的 Adapter（若存在）===
-        # 训练时 TransformNeck3D 的 in_dim = trans_dim，所以必须在 pool 之前调用
-        if hasattr(self, "transform_neck3d") and self.transform_neck3d is not None:
-            # 兼容 (B,T,C) / (T,C) 的写法，这里 x 是 (B,T,C)
-            x = self.transform_neck3d(x)
-
         # 输出
         if not self.use_max_pool:
             # 返回 token 级特征（B, G+1, trans_dim），和 PointLLM 里 point_token_len 对应

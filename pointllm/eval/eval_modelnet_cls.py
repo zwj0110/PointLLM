@@ -60,7 +60,7 @@ def init_model(args):
     cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     cfg.point_backbone = "PointBERT"
     cfg.point_backbone_ckpt = None
-    cfg.point_adapter_ckpt = "/Users/zhengwenjie/projects/PointLLM/output_r03/adapter_epoch5.pth"  # ← 改成你的真实路径
+    cfg.point_adapter_ckpt = "/Users/zhengwenjie/projects/PointLLM/output_r04_projector/adapter_best.pth"  # ← 改成你的真实路径
     cfg.mm_use_point_start_end = False
     cfg.fix_pointnet = True
 

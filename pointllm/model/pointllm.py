@@ -40,7 +40,7 @@ class PointLLMLlamaModel(LlamaModel):
             if getattr(config, "use_color", False):
                 point_bert_config.model.point_dims = 6
             use_max_pool = getattr(point_bert_config.model, "use_max_pool", False) # * default is false
-
+            print(f"user_max_pool is {use_max_pool}.")
             self.point_backbone = PointTransformer(point_bert_config.model, use_max_pool=use_max_pool)
             logger.info(f"Using {self.point_backbone.point_dims} dim of points.")
 
@@ -68,7 +68,6 @@ class PointLLMLlamaModel(LlamaModel):
 
                 # 从 config 读取 adapter 路径（外部设置 config.point_adapter_ckpt 即可）
                 adapter_ckpt = getattr(self.config, "point_adapter_ckpt", None)
-                logger.info(f"[Adapter] Loading adapter from: {adapter_ckpt}")
                 if adapter_ckpt:
                     logger.info(f"[Adapter] Loading adapter from: {adapter_ckpt}")
                     ckpt = torch.load(adapter_ckpt, map_location="cpu", weights_only=False)

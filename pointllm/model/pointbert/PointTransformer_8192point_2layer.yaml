@@ -5,6 +5,7 @@ model : {
   drop_path_rate: 0.1, 
   cls_dim: 40, 
   num_heads: 6,
+  #用 FPS 选 512 个中心点，再用 KNN 找每个中心的 32 个邻域点。
   group_size: 32, 
   num_group: 512,
   encoder_dims: 256,
