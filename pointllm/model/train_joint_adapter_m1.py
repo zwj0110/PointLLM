@@ -12,11 +12,11 @@ cfg = cfg_from_yaml_file("./configs/PointTransformer_8192point_2layer.yaml")
 
 teacher_ckpt = "./checkpoints/pointbert_pretrained_converted.pth"
 student_ckpt = None
-
+use_max_pool = cfg.model.use_max_pool
 # ================================
 # 2. Init teacher (freeze)
 # ================================
-teacher = PointTransformer(cfg.model, use_max_pool=True)
+teacher = PointTransformer(cfg.model, use_max_pool=use_max_pool)
 teacher.load_checkpoint(teacher_ckpt)
 
 for p in teacher.parameters():
@@ -25,7 +25,7 @@ for p in teacher.parameters():
 # ================================
 # 3. Init student (trainable)
 # ================================
-student = PointTransformer(cfg.model, use_max_pool=True)
+student = PointTransformer(cfg.model, use_max_pool=use_max_pool)
 
 if student_ckpt:
     student.load_checkpoint(student_ckpt)
