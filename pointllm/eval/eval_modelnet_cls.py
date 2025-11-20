@@ -19,9 +19,9 @@ for h in logging.root.handlers[:]:
     logging.root.removeHandler(h)
 
 logging.basicConfig(
-    level=logging.INFO,  # ← 关键
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],  # 输出到 stdout
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 
 try:
@@ -33,8 +33,7 @@ from pointllm.data.modelnet40_dir_compat import ModelNet40DirCompat
 from tqdm import tqdm
 from pointllm.eval.evaluator import start_evaluation
 from transformers import AutoTokenizer
- # ★改成你的绝对路径
-
+from transformers import AutoConfig
 
 import os
 import json
@@ -44,7 +43,6 @@ PROMPT_LISTS = [
     "This is an object of "
 ]
 
-from transformers import AutoConfig  # 或者你自己的 PointLLMConfig
 
 def init_model(args):
     disable_torch_init()
@@ -56,23 +54,29 @@ def init_model(args):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
 
-    # 关键：先取 config，先把自定义字段写进去
+    # 1) 先取 config，写入自定义字段
     cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     cfg.point_backbone = "PointBERT"
     cfg.point_backbone_ckpt = None
-    cfg.point_adapter_ckpt = "/Users/zhengwenjie/projects/PointLLM/output_r03_projector/adapter_best.pth"  # ← 改成你的真实路径
+    # 你也可以改成从 args 里读，这里先直接写死路径
+    cfg.point_adapter_ckpt = "/Users/zhengwenjie/projects/PointLLM/output_r04_projector/adapter_best.pth"
     cfg.mm_use_point_start_end = False
     cfg.fix_pointnet = True
 
-    # 再用带好字段的 config 去构建模型，这样 __init__ 里能读到正确路径
+    # 2) 用带自定义字段的 config 来构建模型
     model = PointLLMLlamaForCausalLM.from_pretrained(
         model_name,
-        config=cfg,                        # ★ 关键
+        config=cfg,
         low_cpu_mem_usage=False,
-        torch_dtype=torch.float16 if device == 'mps' else torch.float16,
+        torch_dtype=torch.float16 if device != 'cpu' else torch.float32,
         trust_remote_code=True
     ).to(device)
 
+    # 3) 在 from_pretrained 完成（不再是 meta）之后，真正加载 adapter 权重
+    if hasattr(model, "load_point_adapter"):
+        model.load_point_adapter()  # 不传参则用 cfg.point_adapter_ckpt
+
+    # 4) 初始化 point_backbone 的 tokenizer 配置
     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
 
     conv_mode = "vicuna_v1_1"
@@ -86,7 +90,6 @@ def load_dataset(config_path, split, subset_nums, use_color):
     dataset = None
     # 如果强制用目录直读，或者 .dat 模式不可用
     if args.use_dir or ModelNet is None:
-        # 这里调用目录直读的兼容类
         dataset = ModelNet40DirCompat(
             root=args.modelnet_root,
             split=args.split,
@@ -95,7 +98,6 @@ def load_dataset(config_path, split, subset_nums, use_color):
             subset_nums=args.subset_nums
         )
     else:
-        # 走原始的 .dat 加载
         dataset = ModelNet(
             config_path=args.config_path if hasattr(args, "config_path") else None,
             split=args.split,
@@ -106,14 +108,17 @@ def load_dataset(config_path, split, subset_nums, use_color):
     print("Done!")
     return dataset
 
+
 def get_dataloader(dataset, batch_size, shuffle=False, num_workers=4):
     assert shuffle is False, "Since we using the index of ModelNet as Object ID when evaluation \
         so shuffle shoudl be False and should always set random seed."
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     return dataloader
 
-def generate_outputs(model, tokenizer, input_ids, point_clouds, stopping_criteria, do_sample=True, temperature=1.0, top_k=50, max_length=2048, top_p=0.95):
-    model.eval() 
+
+def generate_outputs(model, tokenizer, input_ids, point_clouds, stopping_criteria,
+                     do_sample=True, temperature=1.0, top_k=50, max_length=2048, top_p=0.95):
+    model.eval()
     with torch.inference_mode():
         output_ids = model.generate(
             input_ids,
@@ -123,7 +128,8 @@ def generate_outputs(model, tokenizer, input_ids, point_clouds, stopping_criteri
             top_k=top_k,
             max_length=max_length,
             top_p=top_p,
-            stopping_criteria=[stopping_criteria]) # * B, L'
+            stopping_criteria=[stopping_criteria]
+        )  # * B, L'
 
     input_token_len = input_ids.shape[1]
     n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
@@ -148,11 +154,10 @@ def start_generation(model, tokenizer, conv, dataloader, prompt_index, output_di
 
     if mm_use_point_start_end:
         default_point_start_token = point_backbone_config['default_point_start_token']
-        default_point_end_token   = point_backbone_config['default_point_end_token']
+        default_point_end_token = point_backbone_config['default_point_end_token']
         qs = default_point_start_token + default_point_patch_token * point_token_len + default_point_end_token + '\n' + qs
     else:
         qs = default_point_patch_token * point_token_len + '\n' + qs
-
 
     conv.append_message(conv.roles[0], qs)
     conv.append_message(conv.roles[1], None)
@@ -167,7 +172,8 @@ def start_generation(model, tokenizer, conv, dataloader, prompt_index, output_di
         inputs = tokenizer([prompt])
     timers["tokenizer"] = tok_timer
 
-    input_ids_ = torch.as_tensor(inputs.input_ids).to('mps')  # tensor of 1, L
+    # 注意：这里用 model.device，而不是写死 'mps'
+    input_ids_ = torch.as_tensor(inputs.input_ids).to(model.device)  # tensor of 1, L
 
     # === FLOPs - 单次前向统计（用首个 batch，B=1）===
     from pointllm.eval.model_stats import flops_by_module, pretty_print_flops, group_sum
@@ -175,10 +181,8 @@ def start_generation(model, tokenizer, conv, dataloader, prompt_index, output_di
 
     it = iter(dataloader)  # 先取一个 batch 用来统计 FLOPs
     first_batch = next(it)
-    pc1 = first_batch["point_clouds"][:1].to('mps').to(model.dtype)  # B=1
+    pc1 = first_batch["point_clouds"][:1].to(model.device).to(model.dtype)  # B=1
     ids1 = input_ids_[:1]
-
-
 
     try:
         by_mod, flops_total = flops_by_module(core, ids1, pc1)
@@ -201,7 +205,7 @@ def start_generation(model, tokenizer, conv, dataloader, prompt_index, output_di
 
     # === 用剩下的 batch 正式推理 ===
     for batch in tqdm(it):
-        point_clouds = batch["point_clouds"].to('mps').to(model.dtype)
+        point_clouds = batch["point_clouds"].to(model.device).to(model.dtype)
         labels = batch["labels"]
         label_names = batch["label_names"]
         indice = batch["indice"]
@@ -250,22 +254,21 @@ def main(args):
     # * ouptut
     args.output_dir = os.path.join(args.model_name, "evaluation")
 
-    # * output file 
+    # * output file
     args.output_file = f"ModelNet_classification_prompt{args.prompt_index}.json"
     args.output_file_path = os.path.join(args.output_dir, args.output_file)
 
     # * First inferencing, then evaluate
     if not os.path.exists(args.output_file_path):
         # * need to generate results first
-        dataset = load_dataset(config_path=None, split=args.split, subset_nums=args.subset_nums, use_color=args.use_color) # * defalut config
+        dataset = load_dataset(config_path=None, split=args.split,
+                               subset_nums=args.subset_nums, use_color=args.use_color)
         dataloader = get_dataloader(dataset, args.batch_size, args.shuffle, args.num_workers)
-    
+
         model, tokenizer, conv = init_model(args)
         core = model.get_model()  # PointLLM 的底层模型（包含 Encoder、Projector、LLM）
         rows, total_params = params_by_module(core)
-        # pretty_print_params(rows, total_params, topk=999999)
 
-        # 如果想按模块大类聚合（可选）：
         prefixes = {
             "Point Encoder": ["point_backbone", "point_encoder", "backbone"],
             "Projector": ["point_proj", "mm_projector", "projector"],
@@ -276,14 +279,15 @@ def main(args):
         timers, _hooks = attach_timers(model, tokenizer)
         print("[Timing] timers attached (tokenizer / point_encoder / projector).")
 
-        # * ouptut
         print(f'[INFO] Start generating results for {args.output_file}.')
-        results = start_generation(model, tokenizer, conv, dataloader, args.prompt_index, args.output_dir, args.output_file, timers = timers)
+        results = start_generation(model, tokenizer, conv, dataloader,
+                                   args.prompt_index, args.output_dir, args.output_file, timers=timers)
 
         # * release model and tokenizer, and release cuda memory
         del model
         del tokenizer
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     else:
         # * directly load the results
         print(f'[INFO] {args.output_file_path} already exists, directly loading...')
@@ -294,12 +298,17 @@ def main(args):
     evaluated_output_file = args.output_file.replace(".json", f"_evaluated_{args.gpt_type}.json")
     # * start evaluation
     if args.start_eval:
-        start_evaluation(results, output_dir=args.output_dir, output_file=evaluated_output_file, eval_type="modelnet-close-set-classification", model_type=args.gpt_type, parallel=True, num_workers=20)
+        start_evaluation(results, output_dir=args.output_dir,
+                         output_file=evaluated_output_file,
+                         eval_type="modelnet-close-set-classification",
+                         model_type=args.gpt_type,
+                         parallel=True, num_workers=20)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, \
-        default="RunsenXu_400/PointLLM_7B_v1.2")
+    parser.add_argument("--model_name", type=str,
+                        default="RunsenXu/PointLLM_7B_v1.2")
 
     # * dataset type
     parser.add_argument("--split", type=str, default="test", help="train or test.")
@@ -308,24 +317,25 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--shuffle", type=bool, default=False)
     parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--subset_nums", type=int, default=-1) # * only use "subset_nums" of samples, mainly for debug 
+    parser.add_argument("--subset_nums", type=int, default=-1)
 
     # * evaluation setting
     parser.add_argument("--prompt_index", type=int, default=0)
     parser.add_argument("--start_eval", action="store_true", default=False)
-    parser.add_argument("--gpt_type", type=str, default="gpt-3.5-turbo-0613", choices=["gpt-3.5-turbo-0613", "gpt-3.5-turbo-1106", "gpt-4-0613", "gpt-4-1106-preview"], help="Type of the model used to evaluate.")
+    parser.add_argument("--gpt_type", type=str, default="gpt-3.5-turbo-0613",
+                        choices=["gpt-3.5-turbo-0613", "gpt-3.5-turbo-1106", "gpt-4-0613", "gpt-4-1106-preview"],
+                        help="Type of the model used to evaluate.")
     parser.add_argument("--use_dir", action="store_true",
                         help="强制使用目录直读（而不是 .dat）")
     parser.add_argument("--modelnet_root", type=str, default=None,
-                        help="ModelNet40 根目录（包含 'ModelNet40' 的上级目录，或直接就是 ModelNet40 目录）")
+                        help="ModelNet40 根目录")
     parser.add_argument("--npoints", type=int, default=8192,
                         help="目录直读时的采样点数")
 
-    # 和 .dat 对齐的两个开关：
     parser.add_argument("--use_color", action="store_true", default=True,
-                        help="是否追加伪颜色（全 0 三通道），使 C 从 3 变 6（或 4->8）")
+                        help="是否追加伪颜色")
     parser.add_argument("--use_height", action="store_true", default=False,
-                        help="是否追加 height 通道（y - y_min），使 C 从 3 变 4")
+                        help="是否追加 height 通道")
     parser.add_argument("--gravity_dim", type=int, default=1,
                         help="height 的重力轴维度（0:x, 1:y, 2:z），默认 1")
 
