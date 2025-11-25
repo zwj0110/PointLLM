@@ -145,9 +145,12 @@ class ModelNet40DistillDataset(Dataset):
     返回字段：
       {
         "name": <相对路径（原始端）>,
-        "original": FloatTensor (N,3),
-        "grasp":    FloatTensor (N,3)
+        "original": FloatTensor (N, C),
+        "grasp":    FloatTensor (N, C)
       }
+    其中 C 可以是 3 或 6，由 point_dims 控制：
+      - point_dims=3: 直接 xyz
+      - point_dims=6: 在 xyz 基础上补 3 维 0（方便兼容 point_bert_v1.2.pt）
     """
     def __init__(
         self,
@@ -158,6 +161,7 @@ class ModelNet40DistillDataset(Dataset):
         cache_npy: bool = True,
         strict_match: bool = True,          # True: 相同相对路径匹配；False: 按文件名匹配
         normalize_unit_sphere: bool = True, # 零均值 + 单位球
+        point_dims: int = 3,                # ⭐ 新增：控制输出维度（3 or 6）
     ):
         super().__init__()
         self.orig_root = Path(original_root).expanduser().resolve()
@@ -167,6 +171,7 @@ class ModelNet40DistillDataset(Dataset):
         self.cache_npy = cache_npy
         self.strict_match = strict_match
         self.normalize_unit_sphere = normalize_unit_sphere
+        self.point_dims = point_dims
 
         if not self.orig_root.is_dir():
             raise FileNotFoundError(f"original_root not found: {self.orig_root}")
@@ -236,8 +241,11 @@ class ModelNet40DistillDataset(Dataset):
         self.cache_o = _cache_dir_for(self.orig_root)
         self.cache_c = _cache_dir_for(self.comp_root)
 
-        logger.info(f"[DistillDataset] pairs={len(self.items)} | "
-                    f"orig={self.orig_root} | comp={self.comp_root} | split={self.split}")
+        logger.info(
+            f"[DistillDataset] pairs={len(self.items)} | "
+            f"orig={self.orig_root} | comp={self.comp_root} | split={self.split} | "
+            f"point_dims={self.point_dims}"
+        )
 
     def __len__(self) -> int:
         return len(self.items)
@@ -285,7 +293,18 @@ class ModelNet40DistillDataset(Dataset):
         pts_o = self._load_and_prepare(o_abs, rel, who="o")  # (N,3)
         pts_c = self._load_and_prepare(c_abs, rel, who="c")  # (N,3)
 
-        # 最终返回 (N,3)，DataLoader 叠成 (B,N,3)
+        # =====⭐ 这里根据 point_dims 扩展到 6 维 =====
+        if self.point_dims == 6:
+            if pts_o.shape[1] == 3:
+                # 这里简单做 xyz + 0，根据需要也可以改成 xyz + xyz
+                zeros = np.zeros_like(pts_o)
+                pts_o = np.concatenate([pts_o, zeros], axis=1)
+            if pts_c.shape[1] == 3:
+                zeros = np.zeros_like(pts_c)
+                pts_c = np.concatenate([pts_c, zeros], axis=1)
+        # ============================================
+
+        # 最终返回 (N,C)，DataLoader 叠成 (B,N,C)
         return {
             "name": rel,
             "original": torch.from_numpy(pts_o).float(),

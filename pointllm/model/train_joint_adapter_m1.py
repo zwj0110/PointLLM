@@ -12,16 +12,24 @@ from pointllm.utils import cfg_from_yaml_file
 # ================================
 cfg = cfg_from_yaml_file("./configs/PointTransformer_8192point_2layer.yaml")
 
-teacher_ckpt = "./checkpoints/pointbert_pretrained_converted.pth"
-student_ckpt = None  # 如果想从某个 student ckpt 继续训，可以填路径
+# ⚠️ 确保这里的 point_dims 和 ckpt 对齐
+# point_bert_v1.2.pt 用的是 6 维（例如 xyz + 额外特征）
+# 你的 yaml 里 model.point_dims 也应该是 6（你说已经改过了）
+teacher_ckpt = "./checkpoints/point_bert_v1.2.pt"
+student_ckpt = "./checkpoints/point_bert_v1.2.pt"  # 学生也从同一个 ckpt 起步
 
 use_max_pool = cfg.model.use_max_pool  # ⚠️ 一定要跟 PointLLM 里保持一致
+point_dims = cfg.model.point_dims      # 这里读出 6
 
 # ================================
 # 2. Init teacher (freeze)
 # ================================
 teacher = PointTransformer(cfg.model, use_max_pool=use_max_pool)
-teacher.load_checkpoint(teacher_ckpt)
+if teacher_ckpt is not None:
+    teacher.load_checkpoint(teacher_ckpt)
+else:
+    print("[WARN] No teacher_ckpt provided, teacher is randomly initialized.")
+
 for p in teacher.parameters():
     p.requires_grad = False
 
@@ -40,22 +48,27 @@ print("[Init] Attached TransformNeck3D to student backbone.")
 # 4. Dataset: 原始 + 压缩
 # ================================
 num_pts = getattr(cfg.model, 'num_points', 8192)
+
 train_set = ModelNet40DistillDataset(
     original_root="./data/modelnet40_train_all_8192",
-    compressed_root="./data/bench_surface_dense_r03_train",
+    compressed_root="./data/bench_surface_dense_r01_train",
     split="train",
     num_points=num_pts,
     cache_npy=True,
     strict_match=True,
+    normalize_unit_sphere=True,
+    point_dims=point_dims,   # ⭐ 关键：告诉 dataset 我们要 6 维
 )
 
 val_set = ModelNet40DistillDataset(
     original_root="./data/modelnet40_test_all_8192",
-    compressed_root="./data/bench_surface_dense_r03_test",
+    compressed_root="./data/bench_surface_dense_r01_test",
     split="test",
     num_points=num_pts,
     cache_npy=True,
     strict_match=True,
+    normalize_unit_sphere=True,
+    point_dims=point_dims,   # ⭐ 同上
 )
 
 # ================================
@@ -68,7 +81,7 @@ trainer = JointFeatureAlignmentTrainer(
     val_dataset=val_set,      # 如果没有 val_set，这里可以直接设为 None
     lr=3e-4,
     batch_size=8,
-    save_dir="./output_r03_projector",
+    save_dir="./output_r01_projector",
     use_cosine=True,
     freeze_student_backbone=True,  # 只训 adapter
 )

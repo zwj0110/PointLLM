@@ -308,7 +308,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str,
-                        default="RunsenXu/PointLLM_7B_v1.2")
+                        default="RunsenXu_graspnet_r04_projector_before2/PointLLM_7B_v1.2")
 
     # * dataset type
     parser.add_argument("--split", type=str, default="test", help="train or test.")
