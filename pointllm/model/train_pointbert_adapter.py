@@ -46,7 +46,7 @@ def main():
 
     train_set = ModelNet40DistillDataset(
         original_root="./data/modelnet40_train_all",
-        compressed_root="./data/bench_graspnet_r01_train_all",
+        compressed_root="./data/bench_graspnet_r02_train_all",
         split="train",
         num_points=num_pts,
         cache_npy=False,
@@ -128,10 +128,10 @@ def main():
     )
 
     # ========== 4. checkpoint 目录 ==========
-    save_dir = "./output_pointbert_r01_block_adapters"
+    save_dir = "./output_pointbert_r02_block_adapters"
     os.makedirs(save_dir, exist_ok=True)
 
-    num_epochs = 10
+    num_epochs = 30
     save_every = 2
     best_loss = float("inf")
 
