@@ -185,6 +185,7 @@ class PointTransformer(nn.Module):
         self.transform_neck3d: nn.Module | None = None
 
     # ========== Adapter 初始化：和你训练脚本保持一致 ==========
+    # ========== Adapter 初始化：和你训练脚本保持一致 ==========
     def init_adapters(
             self,
             start_layer: int | None = None,
@@ -193,29 +194,34 @@ class PointTransformer(nn.Module):
             scale: float = 0.1,
     ):
         """
-        在指定层之后的 Block 上挂 TransformNeck3D。
+        在最后两个 Block 上挂 TransformNeck3D（或者从 start_layer 开始一直到最后）。
 
-        默认从 depth // 2 开始挂（后半部分）。
+        默认：从 depth-2 开始，也就是只给最后两个 block 加 adapter。
         """
         if start_layer is None:
-            start_layer = self.depth // 2
+            # depth 可能是 12，就会从 10 开始 → block 10 和 block 11
+            start_layer = max(self.depth - 2, 0)
 
-        # ★ 从已有参数里拿当前 backbone 的 device（mps / cuda / cpu）
+        # ★ 目标层集合：start_layer, ..., depth-1
+        target_layers = list(range(start_layer, self.depth))
+
+        # ★ 保证 adapter 在和 backbone 相同的 device 上（cuda / mps / cpu）
         device = next(self.parameters()).device
 
         for layer_id, block in enumerate(self.blocks.blocks):
-            if layer_id >= start_layer:
+            if layer_id in target_layers:
                 if block.adapter is None:
                     block.adapter = TransformNeck3D(
                         in_dim=self.trans_dim,
                         hidden_dim=hidden_dim,
                         dropout=dropout,
                         scale=scale,
-                    ).to(device)  # ★ 关键：让 adapter 跟 backbone 在同一个 device 上
+                    ).to(device)
                 print_log(
                     f"[PointTransformer] Attach adapter to block {layer_id}",
                     logger="Transformer",
                 )
+
 
     # ========== 加载 adapter 参数（只加载带 'adapter' 的 key） ==========
     def load_adapter_checkpoint(self, adapter_ckpt_path: str, only_adapter: bool = True):

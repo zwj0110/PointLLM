@@ -314,7 +314,7 @@ def main(args):
             # 1) 先在后半部分 Block 上创建 adapter（结构是 TransformNeck3D）
             if hasattr(pt, "init_adapters"):
                 pt.init_adapters(
-                    start_layer=pt.depth // 2,  # ★ 和你训练脚本一致：从中间往后挂
+                    start_layer=max(pt.depth - 2, 0),  # ★ 和你训练脚本一致：从中间往后挂
                     hidden_dim=256,  # ★ 要和训练 TransformNeck3D 时的 hidden_dim 一致
                     dropout=0.1,
                     scale=1.0,  # ★ 训练时如果用 0.1，就改成 0.1
