@@ -59,7 +59,7 @@ def init_model(args):
     cfg.point_backbone = "PointBERT"
     cfg.point_backbone_ckpt = None
     # 你也可以改成从 args 里读，这里先直接写死路径
-    cfg.point_adapter_ckpt = "/Users/zhengwenjie/projects/PointLLM/output_r04_projector/adapter_best.pth"
+    cfg.point_adapter_ckpt = "output_r04_projector/adapter_best.pth"
     cfg.mm_use_point_start_end = False
     cfg.fix_pointnet = True
 
@@ -314,7 +314,7 @@ if __name__ == "__main__":
     parser.add_argument("--split", type=str, default="test", help="train or test.")
 
     # * data loader, batch_size, shuffle, num_workers
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--shuffle", type=bool, default=False)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--subset_nums", type=int, default=-1)

@@ -51,7 +51,7 @@ num_pts = getattr(cfg.model, 'num_points', 8192)
 
 train_set = ModelNet40DistillDataset(
     original_root="./data/modelnet40_train_all_8192",
-    compressed_root="./data/bench_surface_dense_r01_train",
+    compressed_root="./data/bench_graspnet_r04_train_all",
     split="train",
     num_points=num_pts,
     cache_npy=True,
@@ -62,7 +62,7 @@ train_set = ModelNet40DistillDataset(
 
 val_set = ModelNet40DistillDataset(
     original_root="./data/modelnet40_test_all_8192",
-    compressed_root="./data/bench_surface_dense_r01_test",
+    compressed_root="./data/bench_graspnet_r04_test_all",
     split="test",
     num_points=num_pts,
     cache_npy=True,
@@ -81,7 +81,7 @@ trainer = JointFeatureAlignmentTrainer(
     val_dataset=val_set,      # 如果没有 val_set，这里可以直接设为 None
     lr=3e-4,
     batch_size=8,
-    save_dir="./output_r01_projector",
+    save_dir="./output_r04_projector",
     use_cosine=True,
     freeze_student_backbone=True,  # 只训 adapter
 )

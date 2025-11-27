@@ -129,7 +129,7 @@ def main():
     for f in iter_ply_files(src_root):
         total += 1
         cls, new_name = parse_class_and_newname(f.name)
-        dst_dir = out_root / cls / "test"
+        dst_dir = out_root / cls / "train"
         dst_path = dst_dir / new_name
 
         if not args.dry_run:
