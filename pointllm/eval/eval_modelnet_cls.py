@@ -47,7 +47,7 @@ PROMPT_LISTS = [
 ]
 
 # ★★★ 这里填你训练好的 adapter ckpt 路径 ★★★
-ADAPTER_CKPT = "./output_pointbert_r02/student_adapter_final.pth"
+ADAPTER_CKPT = "./output_pointbert_r02_block_adapters/student_adapter_best.pth"
 
 def init_model(args):
     # Model
@@ -394,12 +394,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        default="RunsenXu/PointLLM_7B_v1.2",
+        default="RunsenXu_graspnet_r02_adapter2/PointLLM_7B_v1.2",
     )
 
     # dataset
     parser.add_argument("--split", type=str, default="test", help="train or test.")
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--shuffle", type=bool, default=False)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument(
