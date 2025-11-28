@@ -7,18 +7,15 @@ import sys
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoTokenizer
 
 from pointllm.conversation import conv_templates, SeparatorStyle
 from pointllm.utils import disable_torch_init
 from pointllm.model.utils import KeywordsStoppingCriteria
 from pointllm.model import PointLLMLlamaForCausalLM
-from pointllm.eval.timing_utils import attach_timers, DeviceTimer
+from pointllm.eval.timing_utils import attach_timers
 from pointllm.eval.model_stats import (
     params_by_module,
-    pretty_print_params,
-    flops_by_module,
-    pretty_print_flops,
     group_sum,
 )
 from pointllm.eval.evaluator import start_evaluation
@@ -49,6 +46,7 @@ PROMPT_LISTS = [
 # ★★★ 这里填你训练好的 adapter ckpt 路径 ★★★
 ADAPTER_CKPT = "./output_pointbert_r02_block_adapters/student_adapter_best.pth"
 
+
 def init_model(args):
     # Model
     disable_torch_init()
@@ -72,14 +70,14 @@ def init_model(args):
     # dtype 选择：
     # - CUDA 上用 bfloat16（和原始脚本一致）
     # - M1(mps) / cpu 上用 float32，最稳
-    if device == "cuda":
-        load_dtype = torch.bfloat16
-    else:
-        load_dtype = torch.float32
-
+    # if device == "cuda":
+    #     load_dtype = torch.bfloat16
+    # else:
+    #     load_dtype = torch.float32
+    load_dtype = torch.float32
     model = PointLLMLlamaForCausalLM.from_pretrained(
         model_name,
-        low_cpu_mem_usage=False,
+        low_cpu_mem_usage=True,
         use_cache=True,
         torch_dtype=load_dtype,
     ).to(device)
@@ -89,47 +87,8 @@ def init_model(args):
     conv_mode = "vicuna_v1_1"
     conv = conv_templates[conv_mode].copy()
 
-    return model, tokenizer, conv
-
-# def init_model(args):
-#     disable_torch_init()
-#     model_name = os.path.expanduser(args.model_name)
-#     print(f"[INFO] Model name: {os.path.basename(model_name)}")
-#
-#     # 设备选择：M1 上优先 mps，其次 cuda，否则 cpu
-#     device = 'mps' if torch.backends.mps.is_available() else \
-#              'cuda' if torch.cuda.is_available() else 'cpu'
-#     print(f"[INFO] Using device: {device}")
-#
-#     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
-#
-#     # 先取 config，写入自定义字段
-#     cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-#     # cfg.point_backbone = "PointBERT"
-#     # cfg.point_backbone_ckpt = None
-#     # cfg.mm_use_point_start_end = False
-#     # cfg.fix_pointnet = True
-#
-#     # ★ 关键：只有 cuda 用 fp16，mps / cpu 用 fp32
-#     if device == "cuda":
-#         load_dtype = torch.float16
-#     else:
-#         load_dtype = torch.float32
-#
-#     model = PointLLMLlamaForCausalLM.from_pretrained(
-#         model_name,
-#         config=cfg,
-#         low_cpu_mem_usage=False,
-#         torch_dtype=load_dtype,
-#         trust_remote_code=True,
-#     ).to(device)
-#
-#     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
-#
-#     conv_mode = "vicuna_v1_1"
-#     conv = conv_templates[conv_mode].copy()
-#     return model, tokenizer, conv
-
+    # ★ 把 device 一起返回，后面统一用
+    return model, tokenizer, conv, device
 
 
 def load_dataset(config_path, split, subset_nums, use_color):
@@ -184,12 +143,13 @@ def generate_outputs(
             top_k=top_k,
             max_length=max_length,
             top_p=top_p,
-            stopping_criteria=[stopping_criteria]) # * B, L'
+            stopping_criteria=[stopping_criteria],  # * B, L'
+        )
 
     input_token_len = input_ids.shape[1]
     n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
     if n_diff_input_output > 0:
-        print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
+        print(f"[Warning] {n_diff_input_output} output_ids are not the same as the input_ids")
     outputs = tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)
     outputs = [output.strip() for output in outputs]
 
@@ -205,6 +165,7 @@ def start_generation(
     output_dir,
     output_file,
     timers=None,
+    device: str = "cpu",   # ★ 新增 device 参数
 ):
     stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
     qs = PROMPT_LISTS[prompt_index]
@@ -212,16 +173,22 @@ def start_generation(
     results = {"prompt": qs}
 
     point_backbone_config = model.get_model().point_backbone_config
-    point_token_len = point_backbone_config['point_token_len']
-    default_point_patch_token = point_backbone_config['default_point_patch_token']
-    default_point_start_token = point_backbone_config['default_point_start_token']
-    default_point_end_token = point_backbone_config['default_point_end_token']
-    mm_use_point_start_end = point_backbone_config['mm_use_point_start_end']
+    point_token_len = point_backbone_config["point_token_len"]
+    default_point_patch_token = point_backbone_config["default_point_patch_token"]
+    default_point_start_token = point_backbone_config["default_point_start_token"]
+    default_point_end_token = point_backbone_config["default_point_end_token"]
+    mm_use_point_start_end = point_backbone_config["mm_use_point_start_end"]
 
     if mm_use_point_start_end:
-        qs = default_point_start_token + default_point_patch_token * point_token_len + default_point_end_token + '\n' + qs
+        qs = (
+            default_point_start_token
+            + default_point_patch_token * point_token_len
+            + default_point_end_token
+            + "\n"
+            + qs
+        )
     else:
-        qs = default_point_patch_token * point_token_len + '\n' + qs
+        qs = default_point_patch_token * point_token_len + "\n" + qs
 
     conv.append_message(conv.roles[0], qs)
     conv.append_message(conv.roles[1], None)
@@ -229,37 +196,48 @@ def start_generation(
     prompt = conv.get_prompt()
     inputs = tokenizer([prompt])
 
-    input_ids_ = torch.as_tensor(inputs.input_ids).to('mps') # * tensor of 1, L
+    # ★ 这里用 device，而不是写死 'mps'
+    input_ids_ = torch.as_tensor(inputs.input_ids).to(device)  # * tensor of 1, L
 
     stopping_criteria = KeywordsStoppingCriteria([stop_str], tokenizer, input_ids_)
 
     responses = []
     print("[DEBUG] enter start_generation, about to iterate dataloader...")
     for batch in tqdm(dataloader):
-        point_clouds = batch["point_clouds"].to('mps').to(model.dtype) # * tensor of B, N, C(3)
+        # ★ point_clouds 同样用 device
+        point_clouds = batch["point_clouds"].to(device)  # * tensor of B, N, C(3)
         labels = batch["labels"]
         label_names = batch["label_names"]
         indice = batch["indice"]
 
         batchsize = point_clouds.shape[0]
 
-        input_ids = input_ids_.repeat(batchsize, 1) # * tensor of B, L
+        input_ids = input_ids_.repeat(batchsize, 1)  # * tensor of B, L
 
-        outputs = generate_outputs(model, tokenizer, input_ids, point_clouds, stopping_criteria) # List of str, length is B
+        outputs = generate_outputs(
+            model,
+            tokenizer,
+            input_ids,
+            point_clouds,
+            stopping_criteria,
+        )  # List of str, length is B
+
         # saving results
         for index, output, label, label_name in zip(indice, outputs, labels, label_names):
-            responses.append({
-                "object_id": index.item(),
-                "ground_truth": label.item(),
-                "model_output": output,
-                "label_name": label_name
-            })
+            responses.append(
+                {
+                    "object_id": index.item(),
+                    "ground_truth": label.item(),
+                    "model_output": output,
+                    "label_name": label_name,
+                }
+            )
 
     results["results"] = responses
 
     os.makedirs(output_dir, exist_ok=True)
     # save the results to a JSON file
-    with open(os.path.join(output_dir, output_file), 'w') as fp:
+    with open(os.path.join(output_dir, output_file), "w") as fp:
         json.dump(results, fp, indent=2)
 
     # * print info
@@ -302,8 +280,7 @@ def main(args):
         )
 
         # 2) 模型
-        # 2) 模型
-        model, tokenizer, conv = init_model(args)
+        model, tokenizer, conv, device = init_model(args)
         core = model.get_model()
 
         # ========== 在 PointBERT backbone 上挂 Block-level adapter，并加载训练好的权重 ==========
@@ -311,13 +288,13 @@ def main(args):
             pt = core.point_backbone
             print("[INFO] point_backbone type:", type(pt))
 
-            # 1) 先在后半部分 Block 上创建 adapter（结构是 TransformNeck3D）
+            # 1) 在最后两个 Block 上创建 adapter（结构是 TransformNeck3D）
             if hasattr(pt, "init_adapters"):
                 pt.init_adapters(
-                    start_layer=max(pt.depth - 2, 0),  # ★ 和你训练脚本一致：从中间往后挂
-                    hidden_dim=256,  # ★ 要和训练 TransformNeck3D 时的 hidden_dim 一致
+                    start_layer=max(pt.depth - 2, 0),
+                    hidden_dim=256,
                     dropout=0.1,
-                    scale=1.0,  # ★ 训练时如果用 0.1，就改成 0.1
+                    scale=1.0,
                 )
                 print("[INFO] init_adapters() called on point_backbone.")
             else:
@@ -327,11 +304,14 @@ def main(args):
             if ADAPTER_CKPT is not None and hasattr(pt, "load_adapter_checkpoint"):
                 pt.load_adapter_checkpoint(
                     ADAPTER_CKPT,
-                    only_adapter=True,  # ✅ 只加载 adapter.*，防止改动 backbone 权重
+                    only_adapter=True,
                 )
                 print(f"[INFO] Adapter checkpoint loaded from {ADAPTER_CKPT}")
             else:
-                print("[INFO] ADAPTER_CKPT is None 或 PointTransformer 没有 load_adapter_checkpoint，按无 adapter 运行。")
+                print(
+                    "[INFO] ADAPTER_CKPT is None 或 PointTransformer 没有 "
+                    "load_adapter_checkpoint，按无 adapter 运行。"
+                )
         else:
             print("[WARN] core has no attribute 'point_backbone', cannot attach adapter.")
 
@@ -343,10 +323,7 @@ def main(args):
             "LLM": ["language_model", "model", "transformer", "lm"],
         }
         grouped_params = group_sum({name: n for name, _, n in rows}, prefixes)
-        print(
-            "Grouped Params (M):",
-            {k: v / 1e6 for k, v in grouped_params.items()},
-        )
+        print("Grouped Params (M):", {k: v / 1e6 for k, v in grouped_params.items()})
         timers, _hooks = attach_timers(model, tokenizer)
         print("[Timing] timers attached (tokenizer / point_encoder / projector).")
 
@@ -361,6 +338,7 @@ def main(args):
             args.output_dir,
             args.output_file,
             timers=timers,
+            device=device,  # ★ 把 device 传进去
         )
 
         # 5) 释放显存
@@ -394,7 +372,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        default="RunsenXu_graspnet_r02_adapter2/PointLLM_7B_v1.2",
+        default="RunsenXu/PointLLM_7B_v1.2",
     )
 
     # dataset

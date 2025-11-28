@@ -133,17 +133,17 @@ class PointLLMLlamaModel(LlamaModel):
         )
 
     def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        point_clouds: Optional[torch.FloatTensor] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            input_ids: torch.LongTensor = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[List[torch.FloatTensor]] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            point_clouds: Optional[torch.FloatTensor] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
         # HACK: replace back original embeddings for pretraining
@@ -155,59 +155,101 @@ class PointLLMLlamaModel(LlamaModel):
         point_backbone = getattr(self, "point_backbone", None)
         point_backbone_config = getattr(self, "point_backbone_config", None)
 
-        # ===== 仅使用原始 PointBERT + projector，不走任何 adapter =====
+        # ===== PointBERT + projector 路径 =====
         if (
-            point_backbone is not None
-            and (input_ids.shape[1] != 1 or self.training)
-            and point_clouds is not None
+                point_backbone is not None
+                and (input_ids.shape[1] != 1 or self.training)
+                and point_clouds is not None
         ):
+            # ★ 用 backbone 的 dtype + device，避免 conv1d dtype mismatch
+            backbone_param = next(self.point_backbone.parameters())
+            backbone_dtype = backbone_param.dtype  # 一般是 float32（我们会在 init 里强制）
+            backbone_device = backbone_param.device  # cuda / mps / cpu
+
+            # ★ 先把点云移到 backbone device + dtype，并清理 NaN / Inf
+            if isinstance(point_clouds, list):
+                pc_list = []
+                for pc in point_clouds:
+                    pc = pc.to(device=backbone_device, dtype=backbone_dtype)
+                    pc = torch.nan_to_num(pc, nan=0.0, posinf=1e4, neginf=-1e4)
+                    pc_list.append(pc)
+            else:
+                pc = point_clouds.to(device=backbone_device, dtype=backbone_dtype)
+                pc = torch.nan_to_num(pc, nan=0.0, posinf=1e4, neginf=-1e4)
+                point_clouds = pc
+
             # 1) 提取点云特征（根据 fix_pointnet 决定是否 no_grad）
             if isinstance(point_clouds, list):
                 raw_point_features = []
                 with torch.no_grad() if self.fix_pointnet else nullcontext():
                     if self.fix_pointnet:
                         self.point_backbone.eval()
-                    for point_cloud in point_clouds:
-                        # point_backbone 返回 [B, ..., C]，这里取 batch 维 0
-                        feat = self.point_backbone(point_cloud.unsqueeze(0))[0]
+                    for pc in point_clouds:
+                        feat = self.point_backbone(pc.unsqueeze(0))[0]  # [G+1, C]
                         raw_point_features.append(feat)
-                # list 情况下逐个过 projector
-                point_features = [self.point_proj(f) for f in raw_point_features]
+
+                # ★ 再兜一层底：防止中间层产生 NaN / Inf
+                clean_feats = []
+                for f in raw_point_features:
+                    f = torch.nan_to_num(f, nan=0.0, posinf=1e4, neginf=-1e4)
+                    clean_feats.append(f)
+                point_features = [self.point_proj(f) for f in clean_feats]
+
             else:
                 with torch.no_grad() if self.fix_pointnet else nullcontext():
                     if self.fix_pointnet:
                         self.point_backbone.eval()
-                    raw_point_features = self.point_backbone(point_clouds)  # [B, N, C] or [B, C]
-                point_features = self.point_proj(raw_point_features)
+                    raw_point_features = self.point_backbone(point_clouds)  # [B, G+1, C]
 
-            # 2) dummy_point_features：用于确保图结构正确（与原版逻辑一致）
+                # ★ 清理 NaN / Inf
+                raw_point_features = torch.nan_to_num(
+                    raw_point_features,
+                    nan=0.0,
+                    posinf=1e4,
+                    neginf=-1e4,
+                )
+                point_features = self.point_proj(raw_point_features)  # [B, G+1, H]
+
+            # 2) dummy_point_features：用于保持图结构一致
             dummy_point_features = torch.zeros(
                 point_backbone_config["point_token_len"],
                 self.point_backbone_config["backbone_output_dim"],
+                device=backbone_device,
+                dtype=backbone_dtype,
+            )
+            dummy_point_features = self.point_proj(dummy_point_features)
+            # projector 输出转成和 LLM embed 一样的 dtype（一般是 bfloat16）
+            dummy_point_features = dummy_point_features.to(
                 device=inputs_embeds.device,
                 dtype=inputs_embeds.dtype,
             )
-            dummy_point_features = self.point_proj(dummy_point_features)
 
-            # 3) 将 point token 特征插入到文本 token 序列中
+            # 3) 把 point token 特征插入到文本 embedding 里
             new_input_embeds = []
             cur_point_idx = 0
             for cur_input_ids, cur_input_embeds in zip(input_ids, inputs_embeds):
                 if (cur_input_ids == point_backbone_config["point_patch_token"]).sum() == 0:
-                    # multimodal LLM, but the current sample is not multimodal
+                    # 这条样本不是多模态，只是确保图里有依赖关系
                     cur_input_embeds = cur_input_embeds + (0.0 * dummy_point_features).sum()
                     new_input_embeds.append(cur_input_embeds)
                     cur_point_idx += 1
                     continue
 
-                cur_point_features = point_features[cur_point_idx].to(
-                    device=cur_input_embeds.device
+                # ★ 对齐 device + dtype，避免 cat 出现问题
+                if isinstance(point_features, list):
+                    cur_point_feat = point_features[cur_point_idx]
+                else:
+                    cur_point_feat = point_features[cur_point_idx]
+
+                cur_point_features = cur_point_feat.to(
+                    device=cur_input_embeds.device,
+                    dtype=cur_input_embeds.dtype,
                 )
                 num_patches = cur_point_features.shape[0]  # number of point tokens
 
                 if point_backbone_config["mm_use_point_start_end"]:
                     if (cur_input_ids == point_backbone_config["point_start_token"]).sum() != (
-                        cur_input_ids == point_backbone_config["point_end_token"]
+                            cur_input_ids == point_backbone_config["point_end_token"]
                     ).sum():
                         raise ValueError(
                             "The number of point start tokens and point end tokens should be the same."
@@ -217,8 +259,8 @@ class PointLLMLlamaModel(LlamaModel):
                     )[0]
                     for point_start_token_pos in point_start_tokens:
                         if (
-                            cur_input_ids[point_start_token_pos + num_patches + 1]
-                            != point_backbone_config["point_end_token"]
+                                cur_input_ids[point_start_token_pos + num_patches + 1]
+                                != point_backbone_config["point_end_token"]
                         ):
                             raise ValueError(
                                 "The point end token should follow the point start token."
@@ -228,20 +270,20 @@ class PointLLMLlamaModel(LlamaModel):
                                 (
                                     cur_input_embeds[:point_start_token_pos].detach(),
                                     cur_input_embeds[
-                                        point_start_token_pos : point_start_token_pos + 1
+                                    point_start_token_pos: point_start_token_pos + 1
                                     ],
                                     cur_point_features,
                                     cur_input_embeds[
-                                        point_start_token_pos
-                                        + num_patches
-                                        + 1 : point_start_token_pos
-                                        + num_patches
-                                        + 2
+                                    point_start_token_pos
+                                    + num_patches
+                                    + 1: point_start_token_pos
+                                         + num_patches
+                                         + 2
                                     ],
                                     cur_input_embeds[
-                                        point_start_token_pos
-                                        + num_patches
-                                        + 2 :
+                                    point_start_token_pos
+                                    + num_patches
+                                    + 2:
                                     ].detach(),
                                 ),
                                 dim=0,
@@ -252,7 +294,7 @@ class PointLLMLlamaModel(LlamaModel):
                                     cur_input_embeds[: point_start_token_pos + 1],
                                     cur_point_features,
                                     cur_input_embeds[
-                                        point_start_token_pos + num_patches + 1 :
+                                    point_start_token_pos + num_patches + 1:
                                     ],
                                 ),
                                 dim=0,
@@ -269,13 +311,13 @@ class PointLLMLlamaModel(LlamaModel):
                     )[0]
                     mask_index_start = masked_indices[0]
                     if (
-                        masked_indices
-                        != torch.arange(
-                            mask_index_start,
-                            mask_index_start + num_patches,
-                            device=masked_indices.device,
-                            dtype=masked_indices.dtype,
-                        )
+                            masked_indices
+                            != torch.arange(
+                        mask_index_start,
+                        mask_index_start + num_patches,
+                        device=masked_indices.device,
+                        dtype=masked_indices.dtype,
+                    )
                     ).any():
                         raise ValueError(
                             "The point patch tokens should be consecutive."
@@ -286,7 +328,7 @@ class PointLLMLlamaModel(LlamaModel):
                             (
                                 cur_input_embeds[:mask_index_start].detach(),
                                 cur_point_features,
-                                cur_input_embeds[mask_index_start + num_patches :].detach(),
+                                cur_input_embeds[mask_index_start + num_patches:].detach(),
                             ),
                             dim=0,
                         )
@@ -295,7 +337,7 @@ class PointLLMLlamaModel(LlamaModel):
                             (
                                 cur_input_embeds[:mask_index_start],
                                 cur_point_features,
-                                cur_input_embeds[mask_index_start + num_patches :],
+                                cur_input_embeds[mask_index_start + num_patches:],
                             ),
                             dim=0,
                         )
@@ -314,7 +356,6 @@ class PointLLMLlamaModel(LlamaModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
 
 
 class PointLLMLlamaForCausalLM(LlamaForCausalLM):

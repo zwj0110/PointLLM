@@ -191,7 +191,7 @@ class PointTransformer(nn.Module):
             start_layer: int | None = None,
             hidden_dim: int = 256,
             dropout: float = 0.1,
-            scale: float = 0.1,
+            scale: float = 1.0,
     ):
         """
         在最后两个 Block 上挂 TransformNeck3D（或者从 start_layer 开始一直到最后）。
@@ -205,22 +205,29 @@ class PointTransformer(nn.Module):
         # ★ 目标层集合：start_layer, ..., depth-1
         target_layers = list(range(start_layer, self.depth))
 
-        # ★ 保证 adapter 在和 backbone 相同的 device 上（cuda / mps / cpu）
-        device = next(self.parameters()).device
+        # ★ 保证 adapter 在和 backbone 相同的 device + dtype 上（cuda / mps / cpu + fp32 / bf16）
+        base_param = next(self.parameters())
+        device = base_param.device
+        dtype = base_param.dtype
 
         for layer_id, block in enumerate(self.blocks.blocks):
             if layer_id in target_layers:
                 if block.adapter is None:
-                    block.adapter = TransformNeck3D(
+                    adapter = TransformNeck3D(
                         in_dim=self.trans_dim,
                         hidden_dim=hidden_dim,
                         dropout=dropout,
                         scale=scale,
-                    ).to(device)
+                    )
+                    # 关键：同时对齐 device 和 dtype
+                    adapter = adapter.to(device=device, dtype=dtype)
+                    block.adapter = adapter
+
                 print_log(
                     f"[PointTransformer] Attach adapter to block {layer_id}",
                     logger="Transformer",
                 )
+
 
 
     # ========== 加载 adapter 参数（只加载带 'adapter' 的 key） ==========
