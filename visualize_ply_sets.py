@@ -120,33 +120,29 @@ def make_single_view_grid(
 # ---------- 使用示例 ----------
 if __name__ == "__main__":
     # 举例：固定一批文件
-    orig = "data/test_datasets_sample/laptop/laptop_0150_xyz_ascii.ply"
+    orig = "data/modelnet40_test_all_8192/flower_pot/test/flower_pot_0158.ply"
     recons = [
-        "data/test_datasets_sample/laptop/grasp_laptop_0150_r01.ply",
-        "data/test_datasets_sample/laptop/grasp_laptop_0150_r02.ply",
-        "data/test_datasets_sample/laptop/grasp_laptop_0150_r03.ply",
-        "data/test_datasets_sample/laptop/grasp_laptop_0150_r04.ply",
-        "data/test_datasets_sample/laptop/grasp_laptop_0150_r05.ply"
+        "data/bench_graspnet_r04_test_all/flower_pot/test/flower_pot_0158.ply"
     ]
-    labels = ["uncompressed", "r01", "r02", "r03", "r04", "r05"]
-    bpps = [None] * 6  # 如果暂时没有 bpp，就全 None
+    labels = ["original", "r04"]
+    bpps = [None] * 2  # 如果暂时没有 bpp，就全 None
 
     # 每个方向各导出一张 2×3 图
     make_single_view_grid(
         orig_path=orig, recon_paths=recons, plane="xy",
-        labels=labels, bpps=bpps, out="laptop_xy_grid.png",
+        labels=labels, bpps=bpps, out="flower_pot_xy_grid.png",
         ncols=3, col_w=2.0, row_h=2.0, dpi=500,
         point_size=3.2, alpha=0.98, bg="white"
     )
     make_single_view_grid(
         orig_path=orig, recon_paths=recons, plane="yz",
-        labels=labels, bpps=bpps, out="laptop_yz_grid.png",
+        labels=labels, bpps=bpps, out="flower_pot_yz_grid.png",
         ncols=3, col_w=2.0, row_h=2.0, dpi=500,
         point_size=3.2, alpha=0.98, bg="white"
     )
     make_single_view_grid(
         orig_path=orig, recon_paths=recons, plane="zx",
-        labels=labels, bpps=bpps, out="laptop_zx_grid.png",
+        labels=labels, bpps=bpps, out="flower_pot_zx_grid.png",
         ncols=3, col_w=2.0, row_h=2.0, dpi=500,
         point_size=3.2, alpha=0.98, bg="white"
     )
