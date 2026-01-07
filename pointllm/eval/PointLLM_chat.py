@@ -2,6 +2,7 @@ import argparse
 from transformers import AutoTokenizer
 import torch
 import os
+import logging
 from pointllm.conversation import conv_templates, SeparatorStyle
 from pointllm.utils import disable_torch_init
 from pointllm.model import *
@@ -10,6 +11,8 @@ from pointllm.model.utils import KeywordsStoppingCriteria
 from pointllm.data import load_objaverse_point_cloud
 
 import os
+
+logger = logging.getLogger(__name__)
 
 def load_point_cloud(args):
     object_id = args.object_id
@@ -22,7 +25,8 @@ def init_model(args):
     # Model
     disable_torch_init()
 
-    model_path = args.model_path 
+    # Support both model_name and model_path for compatibility
+    model_path = getattr(args, 'model_name', None) or getattr(args, 'model_path', None) 
     print(f'[INFO] Model name: {model_path}')
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -30,6 +34,13 @@ def init_model(args):
     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
 
     model.eval()
+
+    # Measure model complexity
+    try:
+        logger.info("Measuring model complexity metrics...")
+        model.measure_complexity(tokenizer, device='cuda', logger=logger)
+    except Exception as e:
+        logger.warning(f"Failed to measure model complexity: {e}")
 
     mm_use_point_start_end = getattr(model.config, "mm_use_point_start_end", False)
     # Add special tokens ind to model.point_config

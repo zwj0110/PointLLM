@@ -11,7 +11,8 @@ from pointllm.eval.timing_utils import DeviceTimer
 from pointllm.eval.model_stats import (
     params_by_module, pretty_print_params,
     flops_by_module, pretty_print_flops,
-    group_sum
+    group_sum,
+    measure_model_complexity
 )
 import logging, sys
 # 如果之前有人配置过 logging，先清掉旧 handler（可选）
@@ -73,11 +74,57 @@ def init_model(args):
     ).to(device)
 
     # 3) 在 from_pretrained 完成（不再是 meta）之后，真正加载 adapter 权重
+    adapter_loaded = False
     if hasattr(model, "load_point_adapter"):
         model.load_point_adapter()  # 不传参则用 cfg.point_adapter_ckpt
+        adapter_loaded = True
 
     # 4) 初始化 point_backbone 的 tokenizer 配置
     model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer)
+
+    # 5) Measure model complexity (with adapter if loaded)
+    logger = logging.getLogger(__name__)
+    try:
+        logger.info("Measuring model complexity metrics...")
+        # Determine point cloud shape from config if available
+        point_cloud_shape = (1, 8192, 3)  # default
+        if hasattr(model.get_model(), 'point_backbone_config'):
+            point_token_len = model.get_model().point_backbone_config.get('point_token_len', 64)
+            # Estimate num_points from token length (rough approximation)
+            point_cloud_shape = (1, point_token_len * 128, 3)
+        
+        metrics = measure_model_complexity(
+            model=model,
+            tokenizer=tokenizer,
+            point_cloud_shape=point_cloud_shape,
+            device=device,
+            use_adapter=adapter_loaded,
+            logger=logger
+        )
+        
+        # Also measure without adapter for comparison if adapter is loaded
+        if adapter_loaded:
+            logger.info("\nMeasuring model complexity WITHOUT adapter for comparison...")
+            # Temporarily disable adapter
+            original_neck = getattr(model.get_model().point_backbone, 'transform_neck3d', None)
+            if original_neck is not None:
+                model.get_model().point_backbone.transform_neck3d = None
+                try:
+                    metrics_no_adapter = measure_model_complexity(
+                        model=model,
+                        tokenizer=tokenizer,
+                        point_cloud_shape=point_cloud_shape,
+                        device=device,
+                        use_adapter=False,
+                        logger=logger
+                    )
+                finally:
+                    # Restore adapter
+                    model.get_model().point_backbone.transform_neck3d = original_neck
+    except Exception as e:
+        logger.warning(f"Failed to measure model complexity: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
 
     conv_mode = "vicuna_v1_1"
     conv = conv_templates[conv_mode].copy()

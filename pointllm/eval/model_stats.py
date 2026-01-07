@@ -66,6 +66,7 @@ class _ForwardWrapper(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, point_clouds: torch.Tensor):
         kwargs = dict(input_ids=input_ids, use_cache=False)
+        # Model should already be in float32 if needed (handled in measure_model_complexity)
         # Try common kw name 'point_clouds'
         try:
             out = self.core(**kwargs, point_clouds=point_clouds)
@@ -243,3 +244,387 @@ def quick_show_flops(core: nn.Module, input_ids: torch.Tensor, point_clouds: tor
     grouped = group_sum(by_mod, prefixes)
     print("Grouped FLOPs (GFLOPs, single forward):", {k: v/1e9 for k, v in grouped.items()})
     return {k: v/1e9 for k, v in grouped.items()}
+
+
+# ---------------------------
+# Comprehensive Model Complexity Analysis
+# ---------------------------
+def measure_model_complexity(
+    model: nn.Module,
+    tokenizer,
+    point_cloud_shape: Tuple[int, int] = (1, 8192, 3),
+    num_warmup: int = 3,
+    num_trials: int = 10,
+    device: str = None,
+    use_adapter: bool = True,
+    logger=None
+) -> Dict:
+    """
+    Comprehensive model complexity measurement including:
+    - Model size (MB/GB)
+    - Trainable parameters (millions/billions)
+    - Total parameters (millions/billions)
+    - kMACs (kilo Multiply-Accumulate operations)
+    - Inference time (ms per point cloud)
+    
+    Args:
+        model: The PointLLM model
+        tokenizer: Tokenizer for creating input_ids
+        point_cloud_shape: Shape of point cloud (batch, num_points, dims)
+        num_warmup: Number of warmup inference runs
+        num_trials: Number of trials for timing
+        device: Device to run on (auto-detect if None)
+        use_adapter: Whether adapter is enabled (for logging purposes)
+        logger: Logger instance (uses print if None)
+    
+    Returns:
+        Dictionary with all metrics
+    """
+    import logging
+    if logger is None:
+        logger = logging.getLogger(__name__)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+    
+    # Auto-detect device
+    if device is None:
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+    
+    model = model.to(device)
+    model.eval()
+    
+    # Detect model dtype from first parameter
+    model_dtype = next(model.parameters()).dtype
+    # Store original dtype to restore later
+    original_dtype = model_dtype
+    
+    # For FLOPs calculation and inference timing, use float32 to avoid dtype mismatch issues
+    # This is safe because we're only measuring, not training
+    use_float32_for_measurement = model_dtype in (torch.float16, torch.bfloat16)
+    
+    if use_float32_for_measurement:
+        # Temporarily convert model to float32 for measurements
+        model = model.float()
+        point_cloud_dtype = torch.float32
+    else:
+        point_cloud_dtype = torch.float32
+    
+    # Create dummy inputs
+    batch_size, num_points, point_dims = point_cloud_shape
+    point_clouds = torch.randn(batch_size, num_points, point_dims, device=device, dtype=point_cloud_dtype)
+    
+    # Create dummy input_ids (simple prompt)
+    dummy_text = "What is this point cloud?"
+    try:
+        input_ids = tokenizer(dummy_text, return_tensors="pt")["input_ids"].to(device)
+    except:
+        # Fallback: create a simple input_ids tensor
+        input_ids = torch.randint(0, 1000, (batch_size, 10), device=device, dtype=torch.long)
+    
+    results = {}
+    
+    # ========== 1. Parameter Counting ==========
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    results["total_parameters"] = total_params
+    results["trainable_parameters"] = trainable_params
+    results["total_parameters_M"] = total_params / 1e6
+    results["trainable_parameters_M"] = trainable_params / 1e6
+    results["total_parameters_B"] = total_params / 1e9
+    results["trainable_parameters_B"] = trainable_params / 1e9
+    
+    # ========== 2. Model Size ==========
+    # Calculate model size in bytes (assuming float32/float16)
+    param_size = 0
+    buffer_size = 0
+    
+    for param in model.parameters():
+        param_size += param.numel() * param.element_size()
+    
+    for buffer in model.buffers():
+        buffer_size += buffer.numel() * buffer.element_size()
+    
+    total_size_bytes = param_size + buffer_size
+    total_size_mb = total_size_bytes / (1024 ** 2)
+    total_size_gb = total_size_bytes / (1024 ** 3)
+    
+    results["model_size_bytes"] = total_size_bytes
+    results["model_size_MB"] = total_size_mb
+    results["model_size_GB"] = total_size_gb
+    
+    # ========== 3. FLOPs / MACs ==========
+    total_flops = None
+    total_macs = None
+    flops_by_mod = None
+    
+    if FlopCountAnalysis is not None:
+        try:
+            wrapper = _ForwardWrapper(model).eval()
+            with torch.no_grad():
+                _device_sync()
+                flops_analysis = FlopCountAnalysis(wrapper, (input_ids, point_clouds))
+                flops_by_mod = flops_analysis.by_module()
+                total_flops = flops_analysis.total()
+                _device_sync()
+            
+            # MACs = FLOPs / 2 (one multiply-accumulate = 2 operations)
+            total_macs = total_flops / 2
+            results["total_FLOPs"] = total_flops
+            results["total_MACs"] = total_macs
+            results["total_kMACs"] = total_macs / 1e3
+            results["total_GMACs"] = total_macs / 1e9
+            results["flops_by_module"] = flops_by_mod
+        except Exception as e:
+            logger.warning(f"Failed to compute FLOPs: {e}")
+            results["flops_error"] = str(e)
+    else:
+        logger.warning("fvcore not available. FLOPs/MACs not computed.")
+        results["flops_error"] = "fvcore not installed"
+    
+    # ========== 4. Inference Time ==========
+    # Model is already in float32 if it was converted above
+    # Warmup
+    with torch.no_grad():
+        for _ in range(num_warmup):
+            try:
+                _ = model(input_ids=input_ids, point_clouds=point_clouds, use_cache=False)
+            except Exception as e:
+                logger.debug(f"Warmup inference warning: {e}")
+                pass
+        _device_sync()
+    
+    # Timing trials
+    times = []
+    with torch.no_grad():
+        for _ in range(num_trials):
+            _device_sync()
+            start_time = time.perf_counter()
+            try:
+                _ = model(input_ids=input_ids, point_clouds=point_clouds, use_cache=False)
+            except Exception as e:
+                logger.warning(f"Inference failed during timing: {e}")
+                break
+            _device_sync()
+            end_time = time.perf_counter()
+            times.append((end_time - start_time) * 1000)  # Convert to ms
+    
+    # Restore original dtype if we converted it
+    if use_float32_for_measurement and original_dtype in (torch.float16, torch.bfloat16):
+        model = model.to(dtype=original_dtype)
+    
+    if times:
+        avg_time_ms = sum(times) / len(times)
+        min_time_ms = min(times)
+        max_time_ms = max(times)
+        results["inference_time_ms"] = avg_time_ms
+        results["inference_time_min_ms"] = min_time_ms
+        results["inference_time_max_ms"] = max_time_ms
+        results["inference_time_std_ms"] = (sum((t - avg_time_ms) ** 2 for t in times) / len(times)) ** 0.5
+    else:
+        results["inference_time_ms"] = None
+        results["inference_time_error"] = "Failed to measure inference time"
+    
+    # ========== 5. Logging ==========
+    adapter_status = "with adapter" if use_adapter else "without adapter"
+    logger.info("=" * 80)
+    logger.info(f"Model Complexity Metrics ({adapter_status.upper()})")
+    logger.info("=" * 80)
+    
+    # Parameters
+    logger.info(f"\n[Parameters]")
+    logger.info(f"  Total parameters:      {total_params/1e6:.3f} M ({total_params/1e9:.6f} B)")
+    logger.info(f"  Trainable parameters:  {trainable_params/1e6:.3f} M ({trainable_params/1e9:.6f} B)")
+    logger.info(f"  Non-trainable:         {(total_params-trainable_params)/1e6:.3f} M")
+    
+    # Model Size
+    logger.info(f"\n[Model Size]")
+    if total_size_gb >= 1.0:
+        logger.info(f"  Model size:           {total_size_gb:.3f} GB ({total_size_mb:.2f} MB)")
+    else:
+        logger.info(f"  Model size:           {total_size_mb:.2f} MB")
+    
+    # FLOPs/MACs
+    logger.info(f"\n[Computational Complexity]")
+    if total_macs is not None:
+        if total_macs >= 1e9:
+            logger.info(f"  Total MACs:           {total_macs/1e9:.3f} GMACs ({total_macs/1e6:.3f} MMACs)")
+        elif total_macs >= 1e6:
+            logger.info(f"  Total MACs:           {total_macs/1e6:.3f} MMACs ({total_macs/1e3:.3f} kMACs)")
+        else:
+            logger.info(f"  Total MACs:           {total_macs/1e3:.3f} kMACs")
+        logger.info(f"  Total FLOPs:          {total_flops/1e9:.3f} GFLOPs")
+    else:
+        logger.info(f"  FLOPs/MACs:           Not available (install fvcore)")
+    
+    # Inference Time
+    logger.info(f"\n[Inference Time]")
+    if results.get("inference_time_ms") is not None:
+        logger.info(f"  Average:              {avg_time_ms:.2f} ms/point cloud")
+        logger.info(f"  Min:                  {min_time_ms:.2f} ms")
+        logger.info(f"  Max:                  {max_time_ms:.2f} ms")
+        if len(times) > 1:
+            logger.info(f"  Std:                  {results['inference_time_std_ms']:.2f} ms")
+    else:
+        logger.info(f"  Inference time:       Not available")
+    
+    logger.info("=" * 80)
+    logger.info("")
+    
+    return results
+
+
+def log_model_complexity_comparison(
+    model_without_adapter: nn.Module,
+    model_with_adapter: nn.Module,
+    tokenizer,
+    point_cloud_shape: Tuple[int, int] = (1, 8192, 3),
+    device: str = None,
+    logger=None
+):
+    """
+    Compare and log model complexity metrics for models with and without adapter.
+    
+    Args:
+        model_without_adapter: Model instance with adapter disabled/removed
+        model_with_adapter: Model instance with adapter enabled
+        tokenizer: Tokenizer for creating input_ids
+        point_cloud_shape: Shape of point cloud
+        device: Device to run on
+        logger: Logger instance
+    """
+    import logging
+    if logger is None:
+        logger = logging.getLogger(__name__)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+    
+    logger.info("\n" + "=" * 80)
+    logger.info("MODEL COMPLEXITY COMPARISON")
+    logger.info("=" * 80)
+    
+    # Measure without adapter
+    logger.info("\n[Measuring model WITHOUT adapter...]")
+    metrics_without = measure_model_complexity(
+        model_without_adapter, tokenizer, point_cloud_shape, device=device, 
+        use_adapter=False, logger=logger
+    )
+    
+    # Measure with adapter
+    logger.info("\n[Measuring model WITH adapter...]")
+    metrics_with = measure_model_complexity(
+        model_with_adapter, tokenizer, point_cloud_shape, device=device,
+        use_adapter=True, logger=logger
+    )
+    
+    # Comparison table
+    logger.info("\n" + "=" * 80)
+    logger.info("COMPARISON SUMMARY")
+    logger.info("=" * 80)
+    
+    logger.info(f"\n{'Metric':<30} {'Without Adapter':<20} {'With Adapter':<20} {'Difference':<20}")
+    logger.info("-" * 90)
+    
+    # Model size
+    size_wo = metrics_without.get("model_size_MB", 0)
+    size_w = metrics_with.get("model_size_MB", 0)
+    diff_size = size_w - size_wo
+    logger.info(f"{'Model Size (MB)':<30} {size_wo:<20.2f} {size_w:<20.2f} {diff_size:+.2f}")
+    
+    # Trainable parameters
+    train_wo = metrics_without.get("trainable_parameters_M", 0)
+    train_w = metrics_with.get("trainable_parameters_M", 0)
+    diff_train = train_w - train_wo
+    logger.info(f"{'Trainable Params (M)':<30} {train_wo:<20.3f} {train_w:<20.3f} {diff_train:+.3f}")
+    
+    # Total parameters
+    total_wo = metrics_without.get("total_parameters_M", 0)
+    total_w = metrics_with.get("total_parameters_M", 0)
+    diff_total = total_w - total_wo
+    logger.info(f"{'Total Params (M)':<30} {total_wo:<20.3f} {total_w:<20.3f} {diff_total:+.3f}")
+    
+    # MACs
+    if metrics_without.get("total_kMACs") and metrics_with.get("total_kMACs"):
+        macs_wo = metrics_without.get("total_kMACs", 0)
+        macs_w = metrics_with.get("total_kMACs", 0)
+        diff_macs = macs_w - macs_wo
+        logger.info(f"{'kMACs':<30} {macs_wo:<20.3f} {macs_w:<20.3f} {diff_macs:+.3f}")
+    
+    # Inference time
+    if metrics_without.get("inference_time_ms") and metrics_with.get("inference_time_ms"):
+        time_wo = metrics_without.get("inference_time_ms", 0)
+        time_w = metrics_with.get("inference_time_ms", 0)
+        diff_time = time_w - time_wo
+        logger.info(f"{'Inference Time (ms)':<30} {time_wo:<20.2f} {time_w:<20.2f} {diff_time:+.2f}")
+    
+    logger.info("=" * 80)
+    logger.info("")
+    
+    return metrics_without, metrics_with
+
+
+def log_model_complexity_simple(
+    model: nn.Module,
+    tokenizer,
+    device: str = None,
+    logger=None
+):
+    """
+    Simple wrapper to measure and log model complexity.
+    Automatically detects if adapter is enabled.
+    
+    Args:
+        model: PointLLM model instance
+        tokenizer: Tokenizer instance
+        device: Device (auto-detect if None)
+        logger: Logger instance (uses print if None)
+    
+    Returns:
+        Dictionary with metrics
+    """
+    import logging
+    if logger is None:
+        logger = logging.getLogger(__name__)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+    
+    # Check if adapter is enabled
+    has_adapter = False
+    if hasattr(model, 'get_model'):
+        point_model = model.get_model()
+        if hasattr(point_model, 'point_backbone'):
+            neck = getattr(point_model.point_backbone, 'transform_neck3d', None)
+            has_adapter = neck is not None
+    
+    # Determine point cloud shape
+    point_cloud_shape = (1, 8192, 3)  # default
+    if hasattr(model, 'get_model'):
+        point_model = model.get_model()
+        if hasattr(point_model, 'point_backbone_config'):
+            config = point_model.point_backbone_config
+            # Try to infer from config
+            if 'point_token_len' in config:
+                # Rough estimate: each token corresponds to ~128 points
+                num_points = config.get('point_token_len', 64) * 128
+                point_dims = config.get('point_cloud_dim', 3)
+                point_cloud_shape = (1, num_points, point_dims)
+    
+    return measure_model_complexity(
+        model=model,
+        tokenizer=tokenizer,
+        point_cloud_shape=point_cloud_shape,
+        device=device,
+        use_adapter=has_adapter,
+        logger=logger
+    )
