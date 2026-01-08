@@ -142,6 +142,84 @@ class PointLLMLlamaModel(LlamaModel):
                 f"Each layer with {point_bert_config.model.projection_hidden_dim} "
                 f"hidden units."
             )
+        elif self.point_backbone_type == "GRASP":
+            # --- build GRASP token backbone ---
+            from pointllm.model.grasp_backbone import GraspTokenBackbone, GraspBackboneArgs
+
+            # 你需要在 config 里提供 grasp_model（已加载好权重的 GeoResCompression）
+            # 例如在外层 build 模型时：model.model.point_backbone = your_grasp_model
+            grasp_model = getattr(config, "grasp_model", None)
+            if grasp_model is None:
+                raise ValueError(
+                    "config.grasp_model is required when point_backbone='GRASP'. "
+                    "Please pass a built & loaded GeoResCompression instance into config.grasp_model."
+                )
+
+            # 复用 PointBERT 的 num_group（保持 token_len 与 prompt 的 <point_patch> 数一致）
+            # 你也可以在 config 指定 grasp_num_group
+            grasp_num_group = getattr(config, "grasp_num_group", None)
+            if grasp_num_group is None:
+                # 如果你仍然使用 point_backbone_config_name 的 yaml，就读它的 num_group
+                point_bert_config_name = getattr(
+                    config, "point_backbone_config_name", "PointTransformer_8192point_2layer"
+                )
+                point_bert_config_addr = os.path.join(
+                    os.path.dirname(__file__), "pointbert", f"{point_bert_config_name}.yaml"
+                )
+                point_bert_config = cfg_from_yaml_file(point_bert_config_addr)
+                grasp_num_group = int(point_bert_config.model.num_group)
+
+            # GRASP residual feature dim (Cg) 必须告诉我们；最稳是你在 config 里显式写 grasp_feat_dim
+            Cg = getattr(config, "grasp_feat_dim", None)
+            if Cg is None:
+                raise ValueError(
+                    "config.grasp_feat_dim is required when point_backbone='GRASP' "
+                    "(it is the feature dim produced by grasp_model.res_enc)."
+                )
+
+            # dense->ME coords 的量化参数：coord_range 与你的点云 normalize 对齐
+            # 如果你的点云在 [-1,1]（常见 unit sphere），用 "sphere"
+            coord_range = getattr(config, "grasp_coord_range", "sphere")  # "sphere" or "unit"
+            grid_size = int(getattr(config, "grasp_grid_size", 256))
+            use_fps = bool(getattr(config, "grasp_use_fps", True))
+
+            grasp_args = GraspBackboneArgs(
+                num_group=grasp_num_group,
+                grid_size=grid_size,
+                coord_range=coord_range,
+                use_fps=use_fps,
+                add_pos=True,
+                cls_token=True,
+            )
+
+            self.point_backbone = GraspTokenBackbone(grasp_model=grasp_model, Cg=Cg, args=grasp_args)
+
+            # backbone / projector 配置
+            self.point_backbone_config = {
+                "point_cloud_dim": 3,                 # 这里 GRASP 只用 xyz 做 coords
+                "backbone_output_dim": Cg,            # projector input dim
+                "project_output_dim": self.config.hidden_size,
+                "point_token_len": grasp_num_group + 1,  # cls + G
+                "mm_use_point_start_end": self.config.mm_use_point_start_end,
+                "projection_hidden_layer": 0,
+                "use_max_pool": False,
+            }
+
+            logger.info(
+                f"[GRASP] num_group={grasp_num_group}, token_len={self.point_backbone_config['point_token_len']}, "
+                f"grid_size={grid_size}, coord_range={coord_range}, Cg={Cg}"
+            )
+
+            # Adapter: GRASP token dim != PointBERT trans_dim，所以这里要用 Cg
+            try:
+                from pointllm.model.transform_neck3d import TransformNeck3D
+                neck_in_dim = Cg
+                self.point_backbone.transform_neck3d = TransformNeck3D(in_dim=neck_in_dim)
+                logger.info(f"[Adapter] transform_neck3d attached for GRASP: {self.point_backbone.transform_neck3d}")
+            except Exception as e:
+                logger.error(f"[Adapter] Failed to init TransformNeck3D module for GRASP: {e}")
+                self.point_backbone.transform_neck3d = None
+
         else:
             # 单层 Linear projector
             self.point_proj = nn.Linear(
@@ -378,7 +456,8 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
             return
 
         logger.info(f"[Adapter] Loading adapter from: {adapter_ckpt}")
-        ckpt = torch.load(adapter_ckpt, map_location="cpu")
+        # Use weights_only=False for compatibility with PyTorch 2.6+
+        ckpt = torch.load(adapter_ckpt, map_location="cpu", weights_only=False)
 
         # 2) 取出真正的 state_dict
         if isinstance(ckpt, dict) and "adapter" in ckpt:
@@ -612,6 +691,25 @@ class PointLLMLlamaForCausalLM(LlamaForCausalLM):
                     print(
                         "Setting output embeddings and all input embeddings trainable."
                     )
+
+    def measure_complexity(self, tokenizer, device=None, logger=None):
+        """
+        Measure and log model complexity metrics including:
+        - Model size (MB/GB)
+        - Trainable parameters (millions/billions)
+        - kMACs (kilo Multiply-Accumulate operations)
+        - Inference time (ms per point cloud)
+        
+        Args:
+            tokenizer: Tokenizer instance for creating input_ids
+            device: Device to run on (auto-detect if None)
+            logger: Logger instance (uses module logger if None)
+        
+        Returns:
+            Dictionary with all metrics
+        """
+        from pointllm.eval.model_stats import log_model_complexity_simple
+        return log_model_complexity_simple(self, tokenizer, device=device, logger=logger)
 
 
 AutoConfig.register("pointllm", PointLLMConfig)
