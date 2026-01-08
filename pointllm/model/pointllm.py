@@ -111,37 +111,6 @@ class PointLLMLlamaModel(LlamaModel):
             except Exception as e:
                 logger.error(f"[Adapter] Failed to init TransformNeck3D module: {e}")
                 self.point_backbone.transform_neck3d = None
-
-        # ========== projector 相关 ==========
-        backbone_output_dim = self.point_backbone_config["backbone_output_dim"]
-        logger.info(f"Point backbone output dim: {backbone_output_dim}.")
-        logger.info(
-            f"Use {self.point_backbone_config['projection_hidden_layer']} "
-            f"projection hiddent layers."
-        )
-
-        if self.point_backbone_config["projection_hidden_layer"] > 0:
-            # 多层 MLP projector: Linear + GELU ... + Linear
-            projection_layers = []
-            last_dim = backbone_output_dim
-            for i in range(point_bert_config.model.projection_hidden_layer):
-                projection_layers.append(
-                    nn.Linear(
-                        last_dim,
-                        self.point_backbone_config["projection_hidden_dim"][i],
-                    )
-                )
-                projection_layers.append(nn.GELU())
-                last_dim = self.point_backbone_config["projection_hidden_dim"][i]
-
-            projection_layers.append(
-                nn.Linear(last_dim, self.point_backbone_config["project_output_dim"])
-            )
-            self.point_proj = nn.Sequential(*projection_layers)
-            logger.info(
-                f"Each layer with {point_bert_config.model.projection_hidden_dim} "
-                f"hidden units."
-            )
         elif self.point_backbone_type == "GRASP":
             # --- build GRASP token backbone ---
             from pointllm.model.grasp_backbone import GraspTokenBackbone, GraspBackboneArgs
@@ -219,7 +188,36 @@ class PointLLMLlamaModel(LlamaModel):
             except Exception as e:
                 logger.error(f"[Adapter] Failed to init TransformNeck3D module for GRASP: {e}")
                 self.point_backbone.transform_neck3d = None
+        # ========== projector 相关 ==========
+        backbone_output_dim = self.point_backbone_config["backbone_output_dim"]
+        logger.info(f"Point backbone output dim: {backbone_output_dim}.")
+        logger.info(
+            f"Use {self.point_backbone_config['projection_hidden_layer']} "
+            f"projection hiddent layers."
+        )
 
+        if self.point_backbone_config["projection_hidden_layer"] > 0:
+            # 多层 MLP projector: Linear + GELU ... + Linear
+            projection_layers = []
+            last_dim = backbone_output_dim
+            for i in range(point_bert_config.model.projection_hidden_layer):
+                projection_layers.append(
+                    nn.Linear(
+                        last_dim,
+                        self.point_backbone_config["projection_hidden_dim"][i],
+                    )
+                )
+                projection_layers.append(nn.GELU())
+                last_dim = self.point_backbone_config["projection_hidden_dim"][i]
+
+            projection_layers.append(
+                nn.Linear(last_dim, self.point_backbone_config["project_output_dim"])
+            )
+            self.point_proj = nn.Sequential(*projection_layers)
+            logger.info(
+                f"Each layer with {point_bert_config.model.projection_hidden_dim} "
+                f"hidden units."
+            )
         else:
             # 单层 Linear projector
             self.point_proj = nn.Linear(
