@@ -117,13 +117,8 @@ class PointLLMLlamaModel(LlamaModel):
 
             # 你需要在 config 里提供 grasp_model（已加载好权重的 GeoResCompression）
             # 例如在外层 build 模型时：model.model.point_backbone = your_grasp_model
-            grasp_model = getattr(config, "grasp_model", None)
-            if grasp_model is None:
-                raise ValueError(
-                    "config.grasp_model is required when point_backbone='GRASP'. "
-                    "Please pass a built & loaded GeoResCompression instance into config.grasp_model."
-                )
-
+            grasp_model = None
+            logger.info("[GRASP] grasp_model will be injected after model initialization (train.py).")
             # 复用 PointBERT 的 num_group（保持 token_len 与 prompt 的 <point_patch> 数一致）
             # 你也可以在 config 指定 grasp_num_group
             grasp_num_group = getattr(config, "grasp_num_group", None)

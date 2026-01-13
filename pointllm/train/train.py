@@ -28,6 +28,8 @@ from pointllm.train.pointllm_trainer import PointLLMTrainer
 from pointllm import conversation as conversation_lib
 from pointllm.model import *
 from pointllm.data import make_object_point_data_module
+from pointllm.utils import *
+from pointllm.data.utils import *
 
 # * logger
 from pointllm.utils import build_logger
@@ -39,6 +41,85 @@ DEFAULT_EOS_TOKEN = "</s>"
 DEFAULT_BOS_TOKEN = "</s>"
 DEFAULT_UNK_TOKEN = "<unk>"
 
+def build_and_load_grasp_model(training_args, logger=None):
+    """
+    Build GRASP-Net GeoResCompression and load checkpoint.
+
+    Required args:
+      - training_args.grasp_config: path to GRASP net_config yaml (e.g. configs/net_config/grasp_dus1.yaml)
+      - training_args.grasp_ckpt:   path to ckpt (e.g. grasp_ckpt/r03.pth)
+      - training_args.grasp_codec_config: path to codec_config yaml (optional; only needed if your loader requires it)
+    """
+    import os
+    import torch
+    import yaml
+
+    if logger is None:
+        import logging
+        logger = logging.getLogger(__name__)
+
+    grasp_config_path = getattr(training_args, "grasp_config", None)
+    grasp_ckpt_path = getattr(training_args, "grasp_ckpt", None)
+
+    if not grasp_config_path or not os.path.exists(grasp_config_path):
+        raise FileNotFoundError(f"[GRASP] grasp_config not found: {grasp_config_path}")
+    if not grasp_ckpt_path or not os.path.exists(grasp_ckpt_path):
+        raise FileNotFoundError(f"[GRASP] grasp_ckpt not found: {grasp_ckpt_path}")
+
+    # ---- load yaml configs ----
+    with open(grasp_config_path, "r") as f:
+        net_config = yaml.safe_load(f)
+
+    codec_config_path = getattr(training_args, "grasp_codec_config", None)
+    codec_config = None
+    if codec_config_path:
+        if not os.path.exists(codec_config_path):
+            raise FileNotFoundError(f"[GRASP] grasp_codec_config not found: {codec_config_path}")
+        with open(codec_config_path, "r") as f:
+            codec_config = yaml.safe_load(f)
+
+    # ---- build a lightweight "syntax" object expected by GRASP ----
+    # GRASP code uses syntax.phase.lower() == 'train' in __init__
+    class _Syntax:
+        def __init__(self, phase="train", **kwargs):
+            self.phase = phase
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    # If your GRASP repo needs more fields, you can add them here:
+    # e.g. base_only / phase / etc.
+    syntax = _Syntax(phase="train")
+
+    # ---- import GeoResCompression ----
+    # IMPORTANT: adjust this import to match YOUR actual file location.
+    # If you copied GRASP code into pointllm/pccai/models/architectures/grasp.py then:
+    from ..pccai.models.architectures.grasp import GeoResCompression
+
+    grasp_model = GeoResCompression(net_config=net_config, syntax=syntax)
+
+    # ---- load checkpoint ----
+    ckpt = torch.load(grasp_ckpt_path, map_location="cpu", weights_only=False)
+    # Try common formats
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        sd = ckpt["state_dict"]
+    elif isinstance(ckpt, dict) and "model" in ckpt:
+        sd = ckpt["model"]
+    else:
+        sd = ckpt
+
+    # Clean 'module.' prefix if saved with DDP
+    clean_sd = {}
+    for k, v in sd.items():
+        if k.startswith("module."):
+            k = k[len("module."):]
+        clean_sd[k] = v
+
+    missing, unexpected = grasp_model.load_state_dict(clean_sd, strict=False)
+    logger.info(f"[GRASP] Loaded ckpt: {grasp_ckpt_path}")
+    logger.info(f"[GRASP] missing={len(missing)}, unexpected={len(unexpected)}")
+
+    grasp_model.eval()  # usually we freeze it; training_args.fix_pointnet controls grads
+    return grasp_model
 
 def _load_yaml(path: str) -> dict:
     try:
@@ -73,6 +154,7 @@ def _clean_state_dict_prefix(sd: dict) -> dict:
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="")
     version: Optional[str] = field(default="v1")
+    point_backbone: str = field(default="PointBERT")
 
 
 @dataclass
@@ -117,6 +199,7 @@ class TrainingArguments(transformers.TrainingArguments):
     use_grasp: bool = field(default=False, metadata={"help": "Use GRASP backbone instead of PointBERT."})
     grasp_ckpt: Optional[str] = field(default=None, metadata={"help": "Path to GRASP checkpoint (GeoResCompression)."})
     grasp_config: Optional[str] = field(default=None, metadata={"help": "Path to GRASP net_config yaml."})
+    grasp_codec_config: Optional[str] = field(default=None, metadata={"help": "Path to GRASP codec_config yaml."})
     grasp_feat_dim: int = field(default=0, metadata={"help": "Cg: feature dim output by grasp_model.res_enc."})
     grasp_grid_size: int = field(default=256, metadata={"help": "Voxel grid resolution for ME coords."})
     grasp_coord_range: str = field(default="sphere", metadata={"help": "sphere: [-1,1]->[0,1], unit: [0,1]."})
@@ -148,7 +231,7 @@ def _switch_to_grasp_backbone(model: "PointLLMLlamaForCausalLM", training_args: 
     # ---- build grasp GeoResCompression ----
     # !!! 改成你项目里 GeoResCompression 的实际 import 路径 !!!
     # 你贴的代码是 GeoResCompression 类，通常在 graspnet/pccai 项目里
-    from graspnet.models.geores_compression import GeoResCompression  # <- 你需要按实际路径修改
+    from ..pccai.models.architectures.grasp import GeoResCompression  # <- 你需要按实际路径修改
 
     net_cfg_all = _load_yaml(training_args.grasp_config)
     # 有些 yaml 外层会包一层，比如 {"net_config": {...}}
@@ -237,43 +320,109 @@ def _switch_to_grasp_backbone(model: "PointLLMLlamaForCausalLM", training_args: 
         f"[GRASP] Switch complete. token_len={G+1}, Cg={Cg}, grid={training_args.grasp_grid_size}, range={training_args.grasp_coord_range}"
     )
 
-
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    training_args.log_level = "info"  # * default is passive(warning)
+    training_args.log_level = "info"
     logger = build_logger(__name__, training_args.output_dir + "/train.log")
 
+    # ================== DEVICE / GPU CHECK ==================
+    cuda_ok = torch.cuda.is_available()
+    num_gpu = torch.cuda.device_count() if cuda_ok else 0
+    gpu_name = torch.cuda.get_device_name(0) if cuda_ok and num_gpu > 0 else "CPU"
+    logger.info(f"[Device] torch.cuda.is_available={cuda_ok}, num_gpu={num_gpu}, gpu0={gpu_name}")
+    logger.info(f"[Device] training_args.device={getattr(training_args, 'device', None)}")
+    logger.info(f"[Env] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
+
+    # ================== 1) load ORIGINAL config (do NOT mutate to GRASP before from_pretrained) ==================
+    config = transformers.AutoConfig.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=training_args.cache_dir,
+    )
+
+    # ================== 2) build model ==================
     if training_args.model_debug:
-        config = transformers.AutoConfig.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-        )
+        # debug: build structure only
         model = PointLLMLlamaForCausalLM._from_config(config)
     else:
-        model = PointLLMLlamaForCausalLM.from_pretrained(
+        # 1) build PointLLM structure (no weights)
+        model = PointLLMLlamaForCausalLM._from_config(config)
+
+        # 2) load a plain Llama/causalLM weights first (this won't hit your KeyError path)
+        from transformers import AutoModelForCausalLM
+
+        dtype = None
+        if getattr(training_args, "bf16", False):
+            dtype = torch.bfloat16
+        elif getattr(training_args, "fp16", False):
+            dtype = torch.float16
+
+        base = AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
         )
+
+        # 3) copy weights into your PointLLM wrapper (allow missing/unexpected keys)
+        missing, unexpected = model.load_state_dict(base.state_dict(), strict=False)
+        logger.info(f"[LoadLLM] loaded base LLM weights. missing={len(missing)} unexpected={len(unexpected)}")
+
+        del base
+
+
+    logger.info(f"[Args] use_grasp={training_args.use_grasp}, grasp_feat_dim={training_args.grasp_feat_dim}")
+    logger.info(f"[BeforeSwitch] backbone={model.get_model().point_backbone.__class__.__name__}")
 
     model.config.use_cache = False
 
-    # ================== GRASP switch (must be BEFORE freezing logic) ==================
+    # ================== 3) switch to GRASP backbone AFTER loading ckpt ==================
     if training_args.use_grasp:
         _switch_to_grasp_backbone(model, training_args, logger)
+    logger.info(f"[AfterSwitch] backbone={model.get_model().point_backbone.__class__.__name__}")
+    logger.info(
+        f"[AfterSwitch] backbone_output_dim={model.get_model().point_backbone_config.get('backbone_output_dim')}")
 
-    # ================== freeze logic ==================
+    # 强制确保真的切到 GRASP
+    if training_args.use_grasp and model.get_model().point_backbone.__class__.__name__ != "GraspTokenBackbone":
+        raise RuntimeError("[GRASP] switch failed: backbone is not GraspTokenBackbone")
+
+    # ================== 4) freeze logic ==================
     if training_args.fix_llm:
-        logger.info("LLM is fixed. Fix_llm flag is set to True")
+        logger.info("LLM is fixed. Fix_llm=True")
         model.requires_grad_(False)
         model.get_model().fix_llm = True
+
+        # keep projector trainable
         model.get_model().point_proj.requires_grad_(True)
-        model.get_model().point_backbone.requires_grad_(True)  # * set as True for fsdp, use fix_pointnet flag to control
+
+        # for FSDP compatibility some code likes this True; fix_pointnet below will decide final
+        model.get_model().point_backbone.requires_grad_(True)
     else:
         model.get_model().fix_llm = False
-        logger.warning("LLM is trainable. Fix_llm flag is set to False")
+        logger.warning("LLM is trainable. Fix_llm=False")
 
+    # point backbone freeze control
+    if not training_args.fix_pointnet:
+        logger.info("Point backbone is trainable. Fix_pointnet=False")
+        model.get_model().fix_pointnet = False
+    else:
+        logger.info("Point backbone is fixed. Fix_pointnet=True")
+        model.get_model().fix_pointnet = True
+        if not training_args.stage_2:
+            logger.info("Set requires_grad of point backbone to False")
+            model.get_model().point_backbone.requires_grad_(False)
+
+    # projector control
+    if training_args.tune_mm_mlp_adapter:
+        logger.info("Point projection layer is trainable (tune_mm_mlp_adapter=True).")
+        model.get_model().point_proj.requires_grad_(True)
+    else:
+        logger.info("Point projection layer is fixed (tune_mm_mlp_adapter=False).")
+        model.get_model().point_proj.requires_grad_(False)
+
+    # ================== 5) tokenizer ==================
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
@@ -288,26 +437,9 @@ def train():
         tokenizer.pad_token = tokenizer.unk_token
         conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1_1"]
 
-    if not training_args.fix_pointnet:
-        logger.info("Point backbone is trainable. Fix_pointnet flag is set to False, pointnet grad will be recorded.")
-        model.get_model().fix_pointnet = False
-    else:
-        logger.info("Point backbone is fixed. Fix_pointnet flag is set to True, pointnet grad will not be recorded.")
-        model.get_model().fix_pointnet = True
-        if not training_args.stage_2:
-            logger.info("Set requires_grad of point backbone to False")
-            model.get_model().point_backbone.requires_grad_(False)
-
-    if training_args.tune_mm_mlp_adapter:
-        logger.info("Point projection layer is trainable.")
-    else:
-        model.get_model().point_proj.requires_grad_(False)
-        logger.info("Point projection layer is fixed.")
-
-    # ================== tokenizer init + backbone ckpt loading ==================
+    # ================== 6) init tokenizer/backbone config ==================
     if not training_args.stage_2:
         if training_args.use_grasp:
-            # GRASP 权重已经在 _switch_to_grasp_backbone() 加载，不要再走 PointBERT 的 load_checkpoint
             logger.info("[GRASP] Skip load_point_backbone_checkpoint (PointBERT-only).")
         else:
             print(f"Default point_backbone_ckpt is {training_args.point_backbone_ckpt}.")
@@ -318,7 +450,21 @@ def train():
         )
     else:
         model.initialize_tokenizer_point_backbone_config_wo_embedding(tokenizer=tokenizer)
+    logger.info(f"[PostInit] backbone={model.get_model().point_backbone.__class__.__name__}")
+    logger.info(f"[PostInit] point_token_len={model.get_model().point_backbone_config.get('point_token_len')}, "
+                f"backbone_output_dim={model.get_model().point_backbone_config.get('backbone_output_dim')}")
 
+    # ================== 7) log trainable params & final device ==================
+    trainable = [(n, p.numel()) for n, p in model.named_parameters() if p.requires_grad]
+    logger.info(f"[Trainable] tensors={len(trainable)}, params={sum(x[1] for x in trainable)}")
+    for n, _ in trainable[:40]:
+        logger.info(f"  [trainable] {n}")
+    try:
+        logger.info(f"[Device] model first param device: {next(model.parameters()).device}")
+    except Exception as e:
+        logger.warning(f"[Device] failed to read model param device: {e}")
+
+    # ================== keep your original code below (data_args / data_module / trainer / train loop) ==================
     point_backbone_config = model.get_model().point_backbone_config
 
     data_args.point_token_len = point_backbone_config["point_token_len"]
@@ -351,7 +497,6 @@ def train():
                 def wrap_func(*args, **kwargs):
                     use_orig_params = kwargs.pop("use_orig_params", True)
                     return func(*args, **kwargs, use_orig_params=use_orig_params)
-
                 return wrap_func
 
             FSDP.__init__ = patch_FSDP_use_orig_params(FSDP.__init__)
@@ -372,7 +517,6 @@ def train():
 
     trainer.save_state()
     safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
-
 
 if __name__ == "__main__":
     train()

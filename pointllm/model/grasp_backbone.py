@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -216,7 +216,7 @@ class GraspTokenBackbone(nn.Module):
             b_idx:    (Nc_total,) int64
         """
         # NOTE: We DO NOT call GeoResCompression.forward() because it mutates batch indices.
-        from pccai.models.utils_sparse import scale_sparse_tensor_batch, sort_sparse_tensor_with_dir
+        from ..pccai.models.utils_sparse import scale_sparse_tensor_batch, sort_sparse_tensor_with_dir
 
         x = self._build_sparse_from_coords(coords)  # base layer sparse tensor
 
@@ -235,6 +235,12 @@ class GraspTokenBackbone(nn.Module):
         return xyz_all, feat_all, b_idx
 
     def forward(self, points_dense: torch.Tensor) -> torch.Tensor:
+        if self.grasp is None:
+            raise RuntimeError(
+                "[GRASP] grasp model is None. You must build/load GeoResCompression "
+                "and pass it into GraspTokenBackbone(grasp_model=...)."
+            )
+
         """
         points_dense: (B, N, 3) or (B, N, 6). only xyz used for coords.
         returns: (B, G+1, Cg) or (B, G, Cg)
