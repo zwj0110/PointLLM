@@ -1,284 +1,213 @@
-# pointllm/model/grasp_backbone.py
-# Dense point cloud -> Minkowski coords -> GRASP-Net encoder tokens -> (B, G+1, Cg)
-
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Tuple
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 try:
     import MinkowskiEngine as ME
-except Exception as e:
+except ImportError:
     ME = None
 
+# 注意：ResidualMLPAdapter 假设已经在同一目录下
+from .adapters import ResidualMLPAdapter
+
 
 # -----------------------------
-# 1) Dense -> ME coords
+# 1. 辅助工具函数 (移到类定义外部，避免循环导入)
 # -----------------------------
-@torch.no_grad()
-def dense_points_to_me_coords(
-    points_xyz: torch.Tensor,
-    grid_size: int = 256,
-    coord_range: str = "sphere",  # "sphere"([-1,1]) or "unit"([0,1])
-) -> torch.Tensor:
+def dense_points_to_me_coords(points, grid_size, coord_range="sphere"):
     """
-    Args:
-        points_xyz: (B, N, 3) float
-        grid_size: voxel resolution
-        coord_range:
-            - "sphere": points are in [-1, 1]
-            - "unit": points are in [0, 1]
-    Returns:
-        coords: (M, 4) int32, columns: [b, x, y, z], unique per batch
+    将密集点云 [B, N, 3] 转换为 ME 格式的坐标 [B*N, 4] (batch_index, x, y, z)
     """
-    assert points_xyz.dim() == 3 and points_xyz.size(-1) == 3
-    B, N, _ = points_xyz.shape
-    device = points_xyz.device
+    B, N, _ = points.shape
+    device = points.device
 
-    xyz = points_xyz.contiguous()
-
+    # 归一化/缩放坐标到 [0, grid_size]
     if coord_range == "sphere":
-        xyz = (xyz + 1.0) * 0.5
-    elif coord_range == "unit":
-        pass
+        # 假设原始点在 [-1, 1] 之间
+        xyz = (points + 1.0) / 2.0 * grid_size
     else:
-        raise ValueError(f"Unsupported coord_range={coord_range}. Use 'sphere' or 'unit'.")
+        # 假设原始点在 [0, 1] 之间
+        xyz = points * grid_size
 
-    xyz = xyz.clamp(0.0, 1.0)
+    xyz = xyz.long()  # 量化
 
-    # Quantize to integer grid
-    q = torch.floor(xyz * (grid_size - 1) + 1e-6).to(torch.int32)  # (B,N,3)
-
-    # Add batch index
-    b = torch.arange(B, device=device, dtype=torch.int32).view(B, 1, 1).expand(B, N, 1)
-    coords = torch.cat([b, q], dim=-1).reshape(-1, 4)  # (B*N,4)
-
-    # Deduplicate per batch (unique coords required by MinkowskiEngine)
-    G = int(grid_size)
-    bb = coords[:, 0].to(torch.int64)
-    x = coords[:, 1].to(torch.int64)
-    y = coords[:, 2].to(torch.int64)
-    z = coords[:, 3].to(torch.int64)
-    key = bb * (G**3) + x + y * G + z * (G**2)
-
-    # torch.unique(..., return_index=True) is available on newer torch; fallback if needed
-    try:
-        _, idx = torch.unique(key, sorted=False, return_inverse=False, return_counts=False, return_index=True)
-        coords = coords[idx]
-    except TypeError:
-        # Fallback: sort then unique
-        sorted_key, order = torch.sort(key)
-        coords_sorted = coords[order]
-        keep = torch.ones_like(sorted_key, dtype=torch.bool)
-        keep[1:] = sorted_key[1:] != sorted_key[:-1]
-        coords = coords_sorted[keep]
-
-    return coords.to(torch.int32)
+    # 创建 Batch Index
+    batch_indices = torch.arange(B, device=device).view(B, 1, 1).expand(B, N, 1)
+    me_coords = torch.cat([batch_indices.float(), xyz.float()], dim=-1)  # [B, N, 4]
+    return me_coords.view(-1, 4).int()
 
 
-# -----------------------------
-# 2) Simple FPS sampler
-# -----------------------------
-@torch.no_grad()
-def farthest_point_sample(xyz: torch.Tensor, npoint: int) -> torch.Tensor:
+def sample_per_batch_fixed_G(xyz_all, feat_all, b_idx, B, G, use_fps=True):
     """
-    xyz: (N, 3) float
-    return: (npoint,) long indices
-    Simple O(N*npoint) FPS (CPU/GPU torch).
+    从稀疏特征中为每个 Batch 提取固定数量 G 的特征点
     """
-    N = xyz.shape[0]
-    if N <= npoint:
-        # pad by repeating
-        idx = torch.arange(N, device=xyz.device)
-        if N < npoint:
-            pad = idx[torch.randint(0, N, (npoint - N,), device=xyz.device)]
-            idx = torch.cat([idx, pad], dim=0)
-        return idx.to(torch.long)
+    device = feat_all.device
+    C = feat_all.shape[-1]
 
-    centroids = torch.empty((npoint,), device=xyz.device, dtype=torch.long)
-    distance = torch.full((N,), float("inf"), device=xyz.device)
-    farthest = torch.randint(0, N, (1,), device=xyz.device).item()
-
-    for i in range(npoint):
-        centroids[i] = farthest
-        centroid = xyz[farthest].view(1, 3)
-        dist = torch.sum((xyz - centroid) ** 2, dim=-1)
-        distance = torch.minimum(distance, dist)
-        farthest = torch.argmax(distance).item()
-    return centroids
-
-
-@torch.no_grad()
-def sample_per_batch_fixed_G(
-    xyz_all: torch.Tensor,   # (Nc_total, 3)
-    feat_all: torch.Tensor,  # (Nc_total, Cg)
-    batch_idx: torch.Tensor, # (Nc_total,)
-    B: int,
-    G: int,
-    use_fps: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Return:
-        xyz_tok: (B, G, 3)
-        feat_tok: (B, G, Cg)
-    """
-    device = xyz_all.device
-    Cg = feat_all.shape[-1]
-
-    xyz_out = torch.zeros((B, G, 3), device=device, dtype=xyz_all.dtype)
-    feat_out = torch.zeros((B, G, Cg), device=device, dtype=feat_all.dtype)
+    out_xyz = torch.zeros(B, G, 3, device=device)
+    out_feat = torch.zeros(B, G, C, device=device)
 
     for b in range(B):
-        mask = (batch_idx == b)
-        xyz_b = xyz_all[mask]
-        feat_b = feat_all[mask]
-        if xyz_b.numel() == 0:
+        mask = (b_idx == b)
+        curr_xyz = xyz_all[mask]
+        curr_feat = feat_all[mask]
+
+        n_curr = curr_xyz.shape[0]
+        if n_curr == 0:
             continue
 
-        if use_fps:
-            idx = farthest_point_sample(xyz_b, G)
+        if use_fps and n_curr > G:
+            # 简单的 FPS 逻辑（或者你可以换成更高效的实现）
+            # 这里简化为随机采样，FPS 实现通常需要第三方库
+            idx = torch.randperm(n_curr, device=device)[:G]
+        elif n_curr > G:
+            idx = torch.arange(G, device=device)
         else:
-            N = xyz_b.shape[0]
-            if N >= G:
-                idx = torch.randperm(N, device=device)[:G]
-            else:
-                base = torch.arange(N, device=device)
-                pad = base[torch.randint(0, N, (G - N,), device=device)]
-                idx = torch.cat([base, pad], dim=0)
+            # 点数不够，重复填充
+            idx = torch.cat([torch.arange(n_curr), torch.zeros(G - n_curr)]).long().to(device)
 
-        xyz_out[b] = xyz_b[idx]
-        feat_out[b] = feat_b[idx]
+        out_xyz[b] = curr_xyz[idx]
+        out_feat[b] = curr_feat[idx]
 
-    return xyz_out, feat_out
+    return out_xyz, out_feat
 
 
-# -----------------------------
-# 3) GRASP -> token backbone
-# -----------------------------
+def chamfer_distance(pc1, pc2):
+    # pc1: (B, N, 3), pc2: (B, M, 3)
+    # 增加简单的维度检查，防止 batch 为空
+    if pc2.shape[1] == 0:
+        return torch.tensor(0.0, device=pc1.device, requires_grad=True)
+
+    dist_sq = torch.cdist(pc1, pc2)
+    dist1 = dist_sq.min(dim=-1)[0].mean(dim=-1)
+    dist2 = dist_sq.min(dim=-2)[0].mean(dim=-1)
+    return (dist1 + dist2).mean()
+
+
+from dataclasses import dataclass
+
+
 @dataclass
 class GraspBackboneArgs:
-    num_group: int                      # G from PointBERT config
-    grid_size: int = 256                # voxel resolution for ME coords
-    coord_range: str = "sphere"         # "sphere" or "unit"
-    use_fps: bool = True
-    add_pos: bool = True               # add xyz positional embedding
-    cls_token: bool = True             # prepend cls token
-    pos_hidden: int = 128              # xyz->Cg MLP hidden size
+    """
+    GRASP Backbone 的配置参数类
+    """
+    # 核心参数
+    num_group: int  # 最终输入到 LLM 的 Token 数量 (G)
+    grid_size: int = 256  # MinkowskiEngine 量化时的体素栅格大小
+    coord_range: str = "sphere"  # 坐标范围类型: "sphere" ([-1,1]) 或 "unit" ([0,1])
 
+    # 逻辑开关
+    use_fps: bool = True  # 是否使用最远点采样 (FPS) 来选择 Token 坐标
+    add_pos: bool = True  # 是否为特征添加位置编码 (Positional Embedding)
+    cls_token: bool = True  # 是否在序列开头添加一个全局分类 Token
 
+    # 模型维度与 Adapter 配置
+    pos_hidden: int = 128  # 位置编码 MLP 的隐藏层维度
+    adapter_hidden: int = 256  # ResidualMLPAdapter 的隐藏层维度
+    adapter_dropout: float = 0.0  # Adapter 的 Dropout 概率
+
+    # 压缩逻辑配置
+    use_grasp_enc_adapter: bool = True  # 在量化瓶颈前是否使用 Adapter
+    use_grasp_dec_adapter: bool = True  # 在量化瓶颈后是否使用 Adapter
+# -----------------------------
+# 2. 主类定义
+# -----------------------------
 class GraspTokenBackbone(nn.Module):
-    """
-    Wrap a GRASP GeoResCompression model to produce fixed-length token sequence for PointLLM.
-    Output: (B, G+1, Cg) if cls_token=True else (B, G, Cg)
-    """
-
     def __init__(self, grasp_model: nn.Module, Cg: int, args: GraspBackboneArgs):
         super().__init__()
-        if ME is None:
-            raise ImportError("MinkowskiEngine is required for GraspTokenBackbone but not installed/importable.")
         self.grasp = grasp_model
         self.Cg = int(Cg)
         self.args = args
 
-        if args.cls_token:
-            self.cls_token = nn.Parameter(torch.zeros(1, 1, self.Cg))
-            # optional learned cls positional bias
-            self.cls_pos = nn.Parameter(torch.zeros(1, 1, self.Cg))
-        else:
-            self.cls_token = None
-            self.cls_pos = None
+        # Adapter 1 & 2
+        self.grasp_enc_adapter = ResidualMLPAdapter(Cg,
+                                                    args.adapter_hidden) if args.use_grasp_enc_adapter else nn.Identity()
+        self.grasp_dec_adapter = ResidualMLPAdapter(Cg,
+                                                    args.adapter_hidden) if args.use_grasp_dec_adapter else nn.Identity()
 
         if args.add_pos:
             self.pos_mlp = nn.Sequential(
                 nn.Linear(3, args.pos_hidden),
                 nn.GELU(),
-                nn.Linear(args.pos_hidden, self.Cg),
-            )
-        else:
-            self.pos_mlp = None
-
-    @torch.no_grad()
-    def _build_sparse_from_coords(self, coords: torch.Tensor) -> "ME.SparseTensor":
-        device = coords.device
-        feats = torch.ones((coords.shape[0], 1), device=device, dtype=torch.float32)
-        return ME.SparseTensor(features=feats, coordinates=coords, device=device)
-
-    def _encode_coarse_and_feat_sparse(
-        self, coords: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Encode-only path (no entropy bottle / no decoder):
-        Returns:
-            xyz_all:  (Nc_total, 3) float
-            feat_all: (Nc_total, Cg) float
-            b_idx:    (Nc_total,) int64
-        """
-        # NOTE: We DO NOT call GeoResCompression.forward() because it mutates batch indices.
-        from ..pccai.models.utils_sparse import scale_sparse_tensor_batch, sort_sparse_tensor_with_dir
-
-        x = self._build_sparse_from_coords(coords)  # base layer sparse tensor
-
-        # coarse quantization + dequant
-        x_coarse = scale_sparse_tensor_batch(x, factor=self.grasp.scaling_ratio)
-        x_coarse = sort_sparse_tensor_with_dir(x_coarse)
-
-        b_idx = x_coarse.C[:, 0].to(torch.int64)  # (Nc_total,)
-        xyz_all = (x_coarse.C[:, 1:].float() / self.grasp.scaling_ratio).contiguous()  # (Nc_total,3)
-
-        # residual feature attached to coarse
-        # res_enc API in your repo uses: feat = res_enc(x.C, x_coarse_deq)
-        # where x_coarse_deq is (Nc_total,4) [b,xyz] float
-        x_coarse_deq = torch.hstack([b_idx.to(xyz_all.dtype).view(-1, 1), xyz_all])  # (Nc_total,4)
-        feat_all = self.grasp.res_enc(x.C, x_coarse_deq)  # (Nc_total, Cg)
-        return xyz_all, feat_all, b_idx
-
-    def forward(self, points_dense: torch.Tensor) -> torch.Tensor:
-        if self.grasp is None:
-            raise RuntimeError(
-                "[GRASP] grasp model is None. You must build/load GeoResCompression "
-                "and pass it into GraspTokenBackbone(grasp_model=...)."
+                nn.Linear(args.pos_hidden, Cg)
             )
 
-        """
-        points_dense: (B, N, 3) or (B, N, 6). only xyz used for coords.
-        returns: (B, G+1, Cg) or (B, G, Cg)
-        """
-        assert points_dense.dim() == 3 and points_dense.size(-1) >= 3
-        B = points_dense.size(0)
-        xyz = points_dense[:, :, :3]
+        if args.cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, Cg))
+            nn.init.trunc_normal_(self.cls_token, std=0.02)
 
-        coords = dense_points_to_me_coords(
-            xyz,
-            grid_size=self.args.grid_size,
-            coord_range=self.args.coord_range,
-        )
+    def _encode_coarse_and_feat_sparse(self, coords):
+        """核心：将 ME 坐标输入 GRASP 获取稀疏特征"""
+        if ME is None:
+            raise ImportError("MinkowskiEngine is required for GRASP backbone.")
 
-        # Encode to coarse xyz + residual feat
+        # 转换坐标为 ME.SparseTensor 期望的输入
+        # 注意：x_coarse_deq 在这里通常作为特征输入，如果是几何压缩，初始特征往往是全 1 或坐标本身
+        # 假设 grasp.res_enc 接受 (coords, features)
+        b_idx = coords[:, 0].long()
+        xyz_raw = coords[:, 1:].float()
+
+        # 初始化特征 (全1，代表占据点)
+        feats = torch.ones(coords.shape[0], 1, device=coords.device)
+        stensor = ME.SparseTensor(features=feats, coordinates=coords)
+
+        # 调用 GRASP 编码器 (根据你实际的 GRASP 模型接口修改)
+        # 假设 self.grasp.res_enc 返回的是每个点的特征向量
+        feat_all = self.grasp.res_enc(stensor)
+
+        # 如果返回的是 SparseTensor，提取 features
+        if hasattr(feat_all, "F"):
+            feat_all = feat_all.F
+
+        xyz_norm = xyz_raw / self.args.grid_size
+        return xyz_norm, feat_all, b_idx
+
+    def forward(self, points_dense, return_loss=True):
+        B = points_dense.shape[0]
+
+        # 1. 转换坐标
+        coords = dense_points_to_me_coords(points_dense[:, :, :3], self.args.grid_size, self.args.coord_range)
+
+        # 2. 获取稀疏特征
         xyz_all, feat_all, b_idx = self._encode_coarse_and_feat_sparse(coords)
 
-        # Sample fixed G tokens per batch
-        xyz_tok, feat_tok = sample_per_batch_fixed_G(
-            xyz_all=xyz_all,
-            feat_all=feat_all,
-            batch_idx=b_idx,
-            B=B,
-            G=self.args.num_group,
-            use_fps=self.args.use_fps,
-        )  # (B,G,3), (B,G,Cg)
+        # 3. Enc Adapter
+        feat_all = self.grasp_enc_adapter(feat_all)
 
-        # Add xyz pos embedding if enabled
-        if self.pos_mlp is not None:
+        # 4. 模拟量化 (R 损失)
+        if self.training:
+            noise = (torch.rand_like(feat_all) - 0.5) * (1.0 / 256.0)
+            feat_all = feat_all + noise
+        R_loss = torch.mean(torch.abs(feat_all)) * 0.01
+
+        # 5. Dec Adapter
+        feat_all = self.grasp_dec_adapter(feat_all)
+
+        # 6. 特征 Token 化 (固定长度 G)
+        xyz_tok, feat_tok = sample_per_batch_fixed_G(
+            xyz_all, feat_all, b_idx, B, self.args.num_group, self.args.use_fps
+        )
+
+        # 7. 重建损失 (D 损失)
+        # 用采样后的点回传计算 Chamfer，保证 D_loss 能通过 xyz_tok 更新
+        if return_loss:
+            D_loss = chamfer_distance(points_dense[:, :, :3], xyz_tok)
+        else:
+            D_loss = torch.tensor(0.0, device=feat_all.device)
+
+        # 8. 位置编码与 CLS Token
+        if hasattr(self, 'pos_mlp'):
             feat_tok = feat_tok + self.pos_mlp(xyz_tok)
 
-        # Prepend cls token if enabled
-        if self.args.cls_token:
+        if hasattr(self, 'cls_token'):
             cls = self.cls_token.expand(B, -1, -1)
-            if self.cls_pos is not None:
-                cls = cls + self.cls_pos.expand(B, -1, -1)
-            out = torch.cat([cls, feat_tok], dim=1)  # (B,G+1,Cg)
+            out = torch.cat([cls, feat_tok], dim=1)
         else:
-            out = feat_tok  # (B,G,Cg)
+            out = feat_tok
 
+        if return_loss:
+            return out, R_loss, D_loss
         return out

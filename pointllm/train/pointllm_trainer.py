@@ -47,3 +47,25 @@ class PointLLMTrainer(Trainer):
                 torch.save(weight_to_save, os.path.join(output_dir, f'point_proj.bin'))
 
         super(PointLLMTrainer, self)._save(output_dir, state_dict)
+
+    # 在 PointLLMTrainer 类中添加此方法
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        重写计算损失的方法，以包含 GRASP 的 R_loss 和 D_loss
+        """
+        outputs = model(**inputs)
+
+        # 1. 基础的 LLM 交叉熵损失
+        loss = outputs.get("loss")
+
+        # 2. 提取 GRASP 带来的辅助损失
+        # 假设我们在模型 forward 中将这些损失存入了 outputs 字典
+        r_loss = outputs.get("r_loss", None)
+        d_loss = outputs.get("d_loss", None)
+
+        if r_loss is not None and d_loss is not None:
+            # 权重系数建议：R_loss (比特率) 影响特征稀疏度，D_loss (重建) 影响几何精度
+            # 建议初值：R_weight=0.01, D_weight=0.5 (根据实验调整)
+            loss = loss + 0.01 * r_loss + 0.5 * d_loss
+
+        return (loss, outputs) if return_outputs else loss
