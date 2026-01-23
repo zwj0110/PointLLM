@@ -1,26 +1,37 @@
-from typing import List, Optional, Tuple, Union
 import os
 import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
-from contextlib import nullcontext
-from transformers import LlamaConfig, LlamaModel, LlamaForCausalLM, AutoConfig, AutoModelForCausalLM
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from typing import Optional
+from dataclasses import dataclass
+from transformers import LlamaConfig, LlamaModel, LlamaForCausalLM
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from .utils import *
-from pointllm.utils import *
 from .adapters import ResidualMLPAdapter
 
 logger = logging.getLogger(__name__)
 
+# HuggingFace / LLaMA 系列里常用的 label mask index
+IGNORE_INDEX = -100
+
+
+@dataclass
+class PointLLMOutput(CausalLMOutputWithPast):
+    loss: Optional[torch.FloatTensor] = None
+    mse_loss: Optional[torch.FloatTensor] = None
+    r_loss: Optional[torch.FloatTensor] = None
+    d_loss: Optional[torch.FloatTensor] = None
+
 
 class PointLLMConfig(LlamaConfig):
     model_type = "pointllm"
-    distill_alpha = 1.0  # MSE 权重
-    lambda_rec = 1.0  # D 权重
-    lambda_rate = 0.01  # R 权重
+
+    def __init__(self, distill_alpha=1.0, lambda_rec=1.0, lambda_rate=0.01, **kwargs):
+        self.distill_alpha = distill_alpha
+        self.lambda_rec = lambda_rec
+        self.lambda_rate = lambda_rate
+        super(PointLLMConfig, self).__init__(**kwargs)
 
 
 class PointLLMLlamaModel(LlamaModel):
@@ -28,156 +39,171 @@ class PointLLMLlamaModel(LlamaModel):
 
     def __init__(self, config: LlamaConfig):
         super(PointLLMLlamaModel, self).__init__(config)
-        # ... [此处保持你原有的 Backbone 初始化逻辑不变] ...
+        # 动态获取 Token 长度，不再硬编码 512
+        self.point_backbone_config = getattr(config, "point_backbone_config", {"point_token_len": 513})
+        self.point_backbone = None
 
-        # Adapter 3: Pre-projector
-        self.pre_proj_adapter = ResidualMLPAdapter(
-            dim=self.point_backbone_config["backbone_output_dim"],
-            hidden_dim=getattr(config, "pre_proj_adapter_hidden", 256)
+        backbone_dim = self.point_backbone_config.get("backbone_output_dim", 8)
+        self.intermediate_dim = 256
+
+        # 识别路径映射 (8 -> 256 -> hidden)
+        self.pre_proj_adapter = nn.Sequential(
+            nn.Linear(backbone_dim, self.intermediate_dim),
+            nn.ReLU(),
+            ResidualMLPAdapter(self.intermediate_dim, self.intermediate_dim)
         )
-        self.point_proj = nn.Linear(self.point_backbone_config["backbone_output_dim"], config.hidden_size)
+        self.point_proj = nn.Linear(self.intermediate_dim, config.hidden_size)
 
     def forward(self, input_ids=None, attention_mask=None, point_clouds=None, **kwargs):
+        # 1) 原始文本 embedding
         inputs_embeds = self.embed_tokens(input_ids)
-        compression_metrics = {}
+        compression_metrics = None
 
         if self.point_backbone is not None and point_clouds is not None:
-            # 1. 教师特征 f (无损)
+            # 2) teacher features (no grad)
             with torch.no_grad():
                 f_teacher = self.point_backbone.get_original_features(point_clouds)
 
-            # 2. 学生特征 hat_f (压缩重构)
+            # student forward: [B, N, 8] + (R, D)
             hat_f_seq, R_loss, D_loss = self.point_backbone(point_clouds, return_loss=True)
 
-            # 3. Pre-proj Adapter
-            hat_f_seq = self.pre_proj_adapter(hat_f_seq)
+            # 3) 维度对齐：严格遵循配置 point_token_len
+            target_n = int(self.point_backbone_config.get("point_token_len", 513))
+            if hat_f_seq.dim() == 2:
+                # [B,8] -> [B,N,8]
+                hat_f_seq = hat_f_seq.unsqueeze(1).repeat(1, target_n, 1)
+            elif hat_f_seq.shape[1] != target_n:
+                # [B,*,8] -> [B,N,8]
+                hat_f_seq = F.interpolate(hat_f_seq.transpose(1, 2), size=target_n).transpose(1, 2)
 
-            # 记录用于 Loss 的指标 (去掉 CLS token 对齐维度)
+            # 4) 映射到 LLM hidden 维度
+            hat_f_seq_256 = self.pre_proj_adapter(hat_f_seq.float())
+            point_features = self.point_proj(hat_f_seq_256).to(inputs_embeds.dtype)  # [B,N,hidden]
+
+            # 5) 更稳健：按 <point_patch> 的 token id 精确替换（如果配置提供了 id）
+            patch_id = self.point_backbone_config.get("point_patch_token_id", None)
+
+            if patch_id is None:
+                # 兜底：沿用旧假设（前 N 个位置是 point slots）
+                if inputs_embeds.size(1) < target_n:
+                    raise ValueError(f"inputs_embeds length {inputs_embeds.size(1)} < target_n {target_n}")
+                inputs_embeds = torch.cat([point_features, inputs_embeds[:, target_n:, :]], dim=1)
+            else:
+                mask = (input_ids == int(patch_id))  # [B,L]
+                counts = mask.sum(dim=1)
+                if torch.any(counts < target_n):
+                    raise ValueError(
+                        f"Not enough <point_patch> tokens: min={counts.min().item()} < target_n={target_n}. "
+                        f"Check your data_module tokenization / point_token_len."
+                    )
+
+                inputs_embeds = inputs_embeds.clone()
+                # 替换每条样本的前 target_n 个 patch 位置
+                for b in range(input_ids.size(0)):
+                    idx = torch.nonzero(mask[b], as_tuple=False).squeeze(-1)[:target_n]  # [target_n]
+                    inputs_embeds[b, idx, :] = point_features[b, :target_n, :]
+
             compression_metrics = {
-                'f_teacher': f_teacher,
-                'f_hat': hat_f_seq[:, 1:, :],
-                'R_loss': R_loss,
-                'D_loss': D_loss
+                "f_teacher": f_teacher,
+                "f_hat": hat_f_seq,
+                "R_loss": R_loss,
+                "D_loss": D_loss,
             }
 
-            # 4. Projector
-            point_features = self.point_proj(hat_f_seq)
-
-            # 5. 拼接逻辑 (简化示意，请使用你原有的长循环替换)
-            # [此处插入你代码中 cur_new_input_embeds 的拼接循环逻辑]
-            # inputs_embeds = self._process_point_tokens(input_ids, inputs_embeds, point_features)
-
-        outputs = super().forward(input_ids=None, inputs_embeds=inputs_embeds, **kwargs)
-        if kwargs.get("return_dict", True):
-            outputs['compression_metrics'] = compression_metrics
+        outputs = super().forward(inputs_embeds=inputs_embeds, attention_mask=attention_mask, **kwargs)
+        if compression_metrics is not None:
+            setattr(outputs, "compression_metrics", compression_metrics)
         return outputs
 
 
-import torch
-import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
-from transformers.modeling_outputs import CausalLMOutputWithPast
-
-from dataclasses import dataclass
-from typing import Optional, List, Union, Tuple
-import torch
-import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
-from transformers.modeling_outputs import CausalLMOutputWithPast
-
-
-# 1. 定义一个扩展的输出类，支持额外的 Loss 字段
-@dataclass
-class PointLLMOutput(CausalLMOutputWithPast):
-    r_loss: Optional[torch.FloatTensor] = None
-    d_loss: Optional[torch.FloatTensor] = None
-    mse_loss: Optional[torch.FloatTensor] = None
-
-
 class PointLLMLlamaForCausalLM(LlamaForCausalLM):
-    def forward(
-            self,
-            input_ids: torch.LongTensor = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
-            inputs_embeds: Optional[torch.FloatTensor] = None,
-            labels: Optional[torch.LongTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            point_clouds: Optional[torch.FloatTensor] = None,
-            return_dict: Optional[bool] = None,
-            **kwargs,
-    ) -> Union[Tuple, PointLLMOutput]:
+    config_class = PointLLMConfig
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+    def __init__(self, config):
+        super(PointLLMLlamaForCausalLM, self).__init__(config)
+        self.model = PointLLMLlamaModel(config)
+        self.post_init()
 
-        # 1. 调用底层的 PointLLMLlamaModel
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            point_clouds=point_clouds,
-            return_dict=True,  # 内部强制 True 方便取数据
-            **kwargs
-        )
-
-        hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
+    def forward(self, input_ids=None, attention_mask=None, labels=None, point_clouds=None, **kwargs) -> PointLLMOutput:
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, point_clouds=point_clouds, **kwargs)
+        logits = self.lm_head(outputs[0])
 
         loss = None
-        # 初始化辅助损失记录
-        r_loss_val, d_loss_val, mse_loss_val = None, None, None
+        ce_loss = torch.tensor(0.0, device=logits.device)
+        r_loss_val = torch.tensor(0.0, device=logits.device)
+        d_loss_val = torch.tensor(0.0, device=logits.device)
+        mse_loss_val = torch.tensor(0.0, device=logits.device)
 
         if labels is not None:
-            # A. 标准 LLM 文本损失
-            loss_fct = CrossEntropyLoss()
+            # 1) CE（忽略 -100）
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
 
-            # B. GRASP 相关损失集成
-            # 注意：此处从 outputs 中提取。确保你的 Model 类在 forward 中确实存了这块数据
-            metrics = getattr(outputs, 'compression_metrics', None)
+            loss_fct = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
+            ce_loss = loss_fct(
+                shift_logits.view(-1, self.config.vocab_size),
+                shift_labels.view(-1)
+            ).float()
+            loss = ce_loss
 
+            # 2) 蒸馏 + R/D
+            metrics = getattr(outputs, "compression_metrics", None)
             if metrics is not None:
-                # 1. 蒸馏损失 (MSE)
-                f_hat = metrics.get('f_hat')
-                f_teacher = metrics.get('f_teacher')
+                f_hat = metrics.get("f_hat")        # [B,N,8]
+                f_teacher = metrics.get("f_teacher")  # [B,1,768] 或 [B,N,768]
 
-                if f_hat is not None and f_teacher is not None:
-                    mse_loss_val = F.mse_loss(f_hat, f_teacher)
+                student_backbone = self.model.point_backbone
+                if f_hat is not None and f_teacher is not None and hasattr(student_backbone, "adapter1"):
+                    # student -> teacher space: [B,N,8] -> [B,N,768]
+                    f_hat_projected = student_backbone.adapter1(f_hat.float())
+
+                    # teacher 是全局 [B,1,768]：对齐 student token 的均值
+                    if f_teacher.dim() == 3 and f_teacher.shape[1] == 1:
+                        f_hat_avg = f_hat_projected.mean(dim=1, keepdim=True)  # [B,1,768]
+                        mse_loss_val = F.mse_loss(f_hat_avg, f_teacher.float())
+                    else:
+                        mse_loss_val = F.mse_loss(f_hat_projected, f_teacher.float())
+
+                    loss = loss + (self.config.distill_alpha * mse_loss_val)
+
+                # 3) R/D（确保是 tensor）
+                r_raw = metrics.get("R_loss", None)
+                d_raw = metrics.get("D_loss", None)
+
+                if torch.is_tensor(r_raw):
+                    r_loss_val = r_raw.to(device=logits.device).mean()
                 else:
-                    mse_loss_val = torch.tensor(0.0).to(logits.device)
+                    r_loss_val = torch.tensor(0.0, device=logits.device)
 
-                # 2. 获取 R 和 D 损失
-                r_loss_val = metrics.get('R_loss', torch.tensor(0.0).to(logits.device))
-                d_loss_val = metrics.get('D_loss', torch.tensor(0.0).to(logits.device))
+                if torch.is_tensor(d_raw):
+                    d_loss_val = d_raw.to(device=logits.device).mean()
+                else:
+                    d_loss_val = torch.tensor(0.0, device=logits.device)
 
-                # 3. 读取超参数权重
-                alpha = getattr(self.config, "distill_alpha", 1.0)
-                l_rec = getattr(self.config, "lambda_rec", 1.0)
-                l_rate = getattr(self.config, "lambda_rate", 0.01)
+                loss = loss + (self.config.lambda_rec * d_loss_val) + (self.config.lambda_rate * r_loss_val)
 
-                # 4. 加权合并
-                loss = loss + (alpha * mse_loss_val) + (l_rec * d_loss_val) + (l_rate * r_loss_val)
-
-        # 5. 返回自定义的 PointLLMOutput
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
+            # 更可调试：打印各项加权贡献
+            if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+                print(
+                    f"\r[TRAIN] "
+                    f"CE:{ce_loss.item():.3f} "
+                    f"| a*MSE:{(self.config.distill_alpha*mse_loss_val).item():.3f} "
+                    f"| rec*D:{(self.config.lambda_rec*d_loss_val).item():.3f} "
+                    f"| rate*R:{(self.config.lambda_rate*r_loss_val).item():.3f} "
+                    f"| Total:{loss.item():.3f}",
+                    end=""
+                )
 
         return PointLLMOutput(
             loss=loss,
             logits=logits,
+            mse_loss=mse_loss_val,
+            r_loss=r_loss_val,
+            d_loss=d_loss_val,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            r_loss=r_loss_val,
-            d_loss=d_loss_val,
-            mse_loss=mse_loss_val
         )
+
+    def get_model(self):
+        return self.model

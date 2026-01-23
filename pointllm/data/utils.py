@@ -1,28 +1,14 @@
 from collections import OrderedDict, defaultdict
-
 import transformers
 from pointllm import conversation as conversation_lib
 from dataclasses import dataclass
-from typing import Optional, Dict, Sequence
+from typing import Optional, Dict, Sequence, List, Any
 import torch
-
 import numpy as np
 import os
-
+import random
 IGNORE_INDEX = -100
 
-# * Sample Usage:
-# * from utils import LRUCache
-# * cache = LRUCache(capacity, max_access_count)
-# if self.cache is None:
-#     info_data = self.multiview_scannet[info_index]
-# else:
-#     info_data = self.cache.get(info_index)
-#     if info_data is None or self.cache.get_access_count(info_index) >= self.cache.max_access_count:
-#         # If not in cache, or accessed max_access_count times, load it and put it in cache
-#         info_data = self.multiview_scannet[info_index]
-#         self.cache.put(info_index, info_data)
-#         self.cache.reset_access_count(info_index)
 
 class LRUCache:
     def __init__(self, capacity, max_access_count):
@@ -35,17 +21,17 @@ class LRUCache:
         if key not in self.cache:
             return None
         value = self.cache.pop(key)
-        self.cache[key] = value  # Put key as the newest one
+        self.cache[key] = value
         self.access_count[key] += 1
         return value
 
     def put(self, key, value):
-        if key in self.cache:  # Update the value and put it as newest
+        if key in self.cache:
             self.cache.pop(key)
-        elif len(self.cache) == self.capacity:  # If cache is full
+        elif len(self.cache) == self.capacity:
             oldest_key = next(iter(self.cache))
-            self.cache.popitem(last=False)  # Remove oldest item
-            del self.access_count[oldest_key]  # Remove the corresponding access count
+            self.cache.popitem(last=False)
+            del self.access_count[oldest_key]
         self.cache[key] = value
         self.access_count[key] = 1
 
@@ -56,28 +42,23 @@ class LRUCache:
         self.access_count[key] = 0
 
 
-def preprocess_v1(
-    sources,
-    tokenizer: transformers.PreTrainedTokenizer,
-) -> Dict:
-    conv = conversation_lib.default_conversation.copy()
+def preprocess_v1(sources, tokenizer):
+    # 1. 强制获取 Vicuna 1.1 模板，确保角色名和分隔符准确
+    conv = conversation_lib.conv_templates["vicuna_v1_1"].copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
-    # Apply prompt templates
+    # 构造原始对话长文本
     conversations = []
     for i, source in enumerate(sources):
-        if roles[source[0]["from"]] != conv.roles[0]:
-            # Skip the first one if it is not from human
-            source = source[1:]
-
+        if source[0]["from"] not in roles:
+            source[0]["from"] = "human"
         conv.messages = []
         for j, sentence in enumerate(source):
-            role = roles[sentence["from"]]
-            assert role == conv.roles[j % 2], f"{i}"
+            role = roles.get(sentence["from"], conv.roles[j % 2])
             conv.append_message(role, sentence["value"])
         conversations.append(conv.get_prompt())
 
-    # Tokenize conversations
+    # 2. Tokenize 转化为张量
     input_ids = tokenizer(
         conversations,
         return_tensors="pt",
@@ -87,103 +68,147 @@ def preprocess_v1(
     ).input_ids
     targets = input_ids.clone()
 
-    assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
-
-    # Mask targets
-    sep = conv.sep + conv.roles[1] + ": "
-    for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
-
+    # 3. 逐样本处理 Mask (Label)
+    for i, (conversation, target) in enumerate(zip(conversations, targets)):
+        # 按照 </s> 分割轮次（处理多轮对话）
         rounds = conversation.split(conv.sep2)
-        cur_len = 1
+        cur_len = 1  # 跳过开头的 BOS (<s>)
         target[:cur_len] = IGNORE_INDEX
-        for i, rou in enumerate(rounds):
-            if rou == "":
-                break
 
-            parts = rou.split(sep)
-            if len(parts) != 2: # * can handle padded tokens
-                break
-            parts[0] += sep
-            round_len = len(tokenizer(rou).input_ids)
-            instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+        for j, rou in enumerate(rounds):
+            if rou == "": break
 
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+            # --- 核心加固：动态匹配分隔符 ---
+            # 针对你的 JSON 格式，处理 USER 和 ASSISTANT 之间的空格或换行
+            possible_seps = [
+                " " + conv.roles[1] + ":",  # " ASSISTANT:"
+                "\n" + conv.roles[1] + ":",  # "\nASSISTANT:"
+                conv.roles[1] + ":"  # "ASSISTANT:"
+            ]
 
+            parts = None
+            actual_sep = None
+            for s in possible_seps:
+                if s in rou:
+                    parts = rou.split(s)
+                    actual_sep = s
+                    break
+
+            # 如果这一轮没搜到分隔符，说明格式异常，屏蔽整轮 Loss
+            if parts is None or len(parts) != 2:
+                # [DEBUG] 偶尔打印提示
+                if random.random() < 0.01:
+                    print(f"⚠️ [DEBUG] 分解失败：在内容中找不到角色分隔符。内容: {rou[:30]}...")
+
+                # 尝试计算当前轮次的长度并跳过
+                temp_len = len(tokenizer(rou).input_ids) - 1
+                cur_len += temp_len + (len(tokenizer(conv.sep2).input_ids) - 1)
+                continue
+
+            # 4. 计算长度并屏蔽指令部分 (Human)
+            # 这里的逻辑是：指令 = [Human部分] + [ASSISTANT:]
+            parts[0] += actual_sep
+
+            round_len = len(tokenizer(rou).input_ids) - 1
+            instruction_len = len(tokenizer(parts[0]).input_ids) - 1
+
+            # 将 Human 的提问部分设为 -100 (不计算 Loss)
+            mask_end = min(cur_len + instruction_len, target.shape[0])
+            target[cur_len: mask_end] = IGNORE_INDEX
+
+            # 累加索引位置，移动到下一轮
             cur_len += round_len
-        target[cur_len:] = IGNORE_INDEX # * this is necessary for padded tokens
+            cur_len += (len(tokenizer(conv.sep2).input_ids) - 1)
 
-        if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len: # * unk tokens in the dialogue will cause this.
-                target[:] = IGNORE_INDEX
-                print(
-                    f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
-                    f" (ignored)"
-                )
+        # 5. 屏蔽末尾所有 Padding 字符
+        if cur_len < target.shape[0]:
+            target[cur_len:] = IGNORE_INDEX
 
-    return dict(
-        input_ids=input_ids,
-        labels=targets,
-    )
+    # --- [DEBUG] 链路透视（仅在第一个样本且随机触发，防止日志过多） ---
+    if random.random() < 0.05:
+        # 统计有效训练 Token 数量
+        valid_label_count = target.ne(IGNORE_INDEX).sum().item()
+        print(f"\n--- [DEBUG 数据透视] ---")
+        print(f"有效可学习 Token 数: {valid_label_count}")
+        if valid_label_count > 0:
+            # 解码模型真正“背诵”的内容
+            learned_content = tokenizer.decode(target[target != IGNORE_INDEX])
+            print(f"模型正在学习的内容: {learned_content[:100]}...")
+        else:
+            print(f"❌ 严重警告：当前样本有效 Label 为 0，请检查分隔符匹配！")
+        print(f"--- [DEBUG 结束] ---\n")
+
+    return dict(input_ids=input_ids, labels=targets)
 
 def preprocess_multimodal_point_cloud(
-    sources: Sequence[str],
-    point_backbone_config: dict,
-    point_indicator: str = "<point>",
+        sources: Sequence[str],
+        point_backbone_config: dict,
+        point_indicator: str = "<point>",
 ) -> Dict:
-    point_token_len = point_backbone_config['point_token_len']
-    default_point_patch_token = point_backbone_config['default_point_patch_token']
+    # 增加默认值防止 Key 丢失导致的静默失败
+    point_token_len = point_backbone_config.get('point_token_len', 513)
+    patch_token = point_backbone_config.get('default_point_patch_token', '<point_patch>')
 
+    # 构造替换长字符串
+    replace_token = patch_token * point_token_len
+
+    if point_backbone_config.get('mm_use_point_start_end', False):
+        start_t = point_backbone_config.get('default_point_start_token', '<point_start>')
+        end_t = point_backbone_config.get('default_point_end_token', '<point_end>')
+        replace_token = start_t + replace_token + end_t
+
+    replaced_count = 0
     for source in sources:
         for sentence in source:
-            replace_token = default_point_patch_token * point_token_len 
-            if point_backbone_config['mm_use_point_start_end']:
-                replace_token = point_backbone_config['default_point_start_token']+ replace_token + point_backbone_config['default_point_end_token']
-            sentence["value"] = sentence["value"].replace(point_indicator, replace_token)
+            if point_indicator in sentence["value"]:
+                # [DEBUG] 记录替换前的长度
+                # print(f"PRE: {len(sentence['value'])}")
+                sentence["value"] = sentence["value"].replace(point_indicator, replace_token)
+                replaced_count += 1
+
+    # [DEBUG] 打印确认信息
+    if replaced_count > 0:
+        print(f"✅ [DEBUG] Multimodal: Replaced '{point_indicator}' in {replaced_count} sentences.")
 
     return sources
 
-def pc_norm(pc):
-    """ pc: NxC, return NxC """
-    xyz = pc[:, :3]
-    other_feature = pc[:, 3:]
 
-    centroid = np.mean(xyz, axis=0)
-    xyz = xyz - centroid
-    m = np.max(np.sqrt(np.sum(xyz ** 2, axis=1)))
-    xyz = xyz / m
-
-    pc = np.concatenate((xyz, other_feature), axis=1)
-    return pc
-
-def load_objaverse_point_cloud(data_path, object_id, pointnum=8192, use_color=False):
-    filename = f"{object_id}_{pointnum}.npy"
-    point_cloud = np.load(os.path.join(data_path, filename))
-
-    # * normalize
-    point_cloud = pc_norm(point_cloud)
-
-    if not use_color:
-        point_cloud = point_cloud[:, :3]
-
-    return point_cloud
 
 @dataclass
 class DataCollatorForPointTextDataset(object):
-    """Collate examples for mixed dataset with text and point cloud data."""
-
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        # 1. 严格过滤：必须是字典、不能为 None、必须包含 input_ids 且不能为空张量
+        valid_instances = [
+            inst for inst in instances
+            if inst is not None and isinstance(inst, dict) and 'input_ids' in inst
+        ]
+
+        # 2. 极端情况处理：如果整个 Batch 都坏了
+        if len(valid_instances) == 0:
+            # 这里的预览会更有用
+            print(f"❌ Batch 彻底失败。收到数据类型: {[type(i) for i in instances]}")
+            if len(instances) > 0 and isinstance(instances[0], dict):
+                print(f"第一个字典的键: {instances[0].keys()}")
+            raise ValueError("当前 Batch 所有样本均预处理失败！请检查 Dataset 是否返回了有效字典。")
+
+        instances = valid_instances
         input_ids, labels = tuple([instance[key] for instance in instances]
                                   for key in ("input_ids", "labels"))
+
+        # 4. 文本序列 Padding
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids,
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id)
-        labels = torch.nn.utils.rnn.pad_sequence(labels,
-                                                 batch_first=True,
-                                                 padding_value=IGNORE_INDEX)
+
+        labels = torch.nn.utils.rnn.pad_sequence(
+            labels,
+            batch_first=True,
+            padding_value=IGNORE_INDEX)  # 确保 IGNORE_INDEX = -100 已在文件开头定义
+
+        # 5. 构造输出 Batch
         batch = dict(
             input_ids=input_ids,
             labels=labels,
@@ -192,23 +217,48 @@ class DataCollatorForPointTextDataset(object):
 
         if 'point_clouds' in instances[0]:
             point_clouds = [instance['point_clouds'] for instance in instances]
-            if all(x is not None and x.shape == point_clouds[0].shape for x in point_clouds): # * point_clouds have different shapes
+            if all(x.shape == point_clouds[0].shape for x in point_clouds):
                 batch['point_clouds'] = torch.stack(point_clouds)
+                # [DEBUG] 极其重要的形状检查
+                print(
+                    f"🚀 [DEBUG] Final Batch shapes -> Input: {batch['input_ids'].shape}, Points: {batch['point_clouds'].shape}")
             else:
-                batch['point_clouds'] = point_clouds # * return as lists
+                batch['point_clouds'] = point_clouds
+                print(f"⚠️ [DEBUG] Variable Point Clouds detected in batch.")
 
         return batch
 
+
+def pc_norm(pc):
+    xyz = pc[:, :3]
+    other_feature = pc[:, 3:]
+    centroid = np.mean(xyz, axis=0)
+    xyz = xyz - centroid
+    m = np.max(np.sqrt(np.sum(xyz ** 2, axis=1)))
+    # 防止除以 0
+    if m < 1e-6: m = 1.0
+    xyz = xyz / m
+    return np.concatenate((xyz, other_feature), axis=1)
+
+
+def load_objaverse_point_cloud(data_path, object_id, pointnum=8192, use_color=False):
+    filename = f"{object_id}_{pointnum}.npy"
+    full_path = os.path.join(data_path, filename)
+    if not os.path.exists(full_path):
+        # 调试路径用
+        print(f"❌ 找不到点云文件: {full_path}")
+        return None
+
+    point_cloud = np.load(full_path)
+    point_cloud = pc_norm(point_cloud)
+    if not use_color:
+        point_cloud = point_cloud[:, :3]
+    return point_cloud
+
+
 def farthest_point_sample(point, npoint):
-    """
-    Input:
-        xyz: pointcloud data, [N, D]
-        npoint: number of samples
-    Return:
-        centroids: sampled pointcloud index, [npoint, D]
-    """
     N, D = point.shape
-    xyz = point[:,:3]
+    xyz = point[:, :3]
     centroids = np.zeros((npoint,))
     distance = np.ones((N,)) * 1e10
     farthest = np.random.randint(0, N)
@@ -219,18 +269,4 @@ def farthest_point_sample(point, npoint):
         mask = dist < distance
         distance[mask] = dist[mask]
         farthest = np.argmax(distance, -1)
-    point = point[centroids.astype(np.int32)]
-    return point
-
-def pc_normalize(pc):
-    """
-    pc: Nx3 array
-    This functions normalizes a point cloud to fit within a unit sphere.
-    It first calculates the centroid of the point cloud and then subtracts
-    it from all points before scaling all points to fit within a unit sphere.
-    """
-    centroid = np.mean(pc, axis=0)
-    pc = pc - centroid
-    m = np.max(np.sqrt(np.sum(pc**2, axis=1)))
-    pc = pc / m
-    return pc
+    return point[centroids.astype(np.int32)]
