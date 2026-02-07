@@ -121,7 +121,7 @@ class MinkowskiUnion(Module):
             >>>     force_creation=True  # The tensor stride [1, 1] already exists.
             >>> )
             >>> union = MinkowskiUnion()
-            >>> output = union(input1, iput2)
+            >>> RunsenXu_graspnet_enc_dec_r04 = union(input1, iput2)
 
         """
         assert isinstance(inputs, (list, tuple)), "The input must be a list or tuple"

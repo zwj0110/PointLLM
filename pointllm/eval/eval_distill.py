@@ -190,7 +190,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base_model_path", type=str, default="RunsenXu/PointLLM_7B_v1.2")
+    parser.add_argument("--base_model_path", type=str, default="RunsenXu_graspnet_enc_dec_r03_bak/PointLLM_7B_v1.2")
     parser.add_argument("--my_checkpoint_dir", type=str, required=True)
     parser.add_argument("--grasp_config", type=str, required=True)
     parser.add_argument("--modelnet_root", type=str, required=True)

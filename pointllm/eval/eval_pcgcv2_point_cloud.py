@@ -141,7 +141,7 @@ def main(args):
     # * ouptut
     args.output_dir = os.path.join(args.model_name, "evaluation")
     
-    # * output file 
+    # * RunsenXu_graspnet_enc_dec_r04 file
     anno_file = os.path.splitext(os.path.basename(args.anno_path))[0]
     args.output_file = f"{anno_file}_Objaverse_{args.task_type}_prompt{args.prompt_index}.json"
     args.output_file_path = os.path.join(args.output_dir, args.output_file)

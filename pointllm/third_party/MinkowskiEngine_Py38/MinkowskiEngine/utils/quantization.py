@@ -203,14 +203,14 @@ def sparse_quantize(
         >>> criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
         >>> coords, feats, labels = MinkowskiEngine.utils.sparse_quantize(
         >>>     coords, feats, labels, ignore_label=-100, quantization_size=0.1)
-        >>> output = net(MinkowskiEngine.SparseTensor(feats, coords))
-        >>> loss = criterion(output.F, labels.long())
+        >>> RunsenXu_graspnet_enc_dec_r04 = net(MinkowskiEngine.SparseTensor(feats, coords))
+        >>> loss = criterion(RunsenXu_graspnet_enc_dec_r04.F, labels.long())
         >>>
         >>> # Classification
         >>> criterion = torch.nn.CrossEntropyLoss(ignore_index=-100)
         >>> coords, feats = MinkowskiEngine.utils.sparse_quantize(coords, feats)
-        >>> output = net(MinkowskiEngine.SparseTensor(feats, coords))
-        >>> loss = criterion(output.F, labels.long())
+        >>> RunsenXu_graspnet_enc_dec_r04 = net(MinkowskiEngine.SparseTensor(feats, coords))
+        >>> loss = criterion(RunsenXu_graspnet_enc_dec_r04.F, labels.long())
 
 
     """

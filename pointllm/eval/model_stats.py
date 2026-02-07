@@ -73,7 +73,7 @@ class _ForwardWrapper(nn.Module):
         except TypeError:
             # Fallback to 'points'
             out = self.core(**kwargs, points=point_clouds)
-        # fvcore only needs to trace ops; return a tensor-ish output
+        # fvcore only needs to trace ops; return a tensor-ish RunsenXu_graspnet_enc_dec_r04
         if hasattr(out, "logits"):
             return out.logits
         if isinstance(out, (tuple, list)) and len(out) > 0:

@@ -1,7 +1,13 @@
+# Copyright (c) 2010-2022, InterDigital
+# All rights reserved. 
+
+# See LICENSE under the root folder.
+
+# GRASP-Net: Geometric Residual Analysis and Synthesis for Point Cloud Compression
+
 import os, sys
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 import time
 import MinkowskiEngine as ME
@@ -9,32 +15,51 @@ import MinkowskiEngine as ME
 from pccai.models.modules.get_modules import get_module_class
 from pccai.models.utils_sparse import scale_sparse_tensor_batch, sort_sparse_tensor_with_dir
 
-# 保持原有的 import 路径
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../third_party/PCGCv2'))
+from data_utils import read_ply_ascii_geo, write_ply_ascii_geo
 from entropy_model import EntropyBottleneck
+from gpcc import gpcc_encode, gpcc_decode
+from data_utils import scale_sparse_tensor
 
 
 class GeoResCompression(nn.Module):
+    """
+    Geometric Residual Analysis and Synthesis for PCC
+    """
+
     def __init__(self, net_config, syntax):
         super(GeoResCompression, self).__init__()
 
-        # 基础参数加载
-        self.dus = net_config.get('dus', 1)
+        # Grab the basic parameters
+        self.dus = net_config.get('dus', 1) # down-up scaling can be 1 or 2
         self.scaling_ratio = net_config['scaling_ratio']
-        self.eb_channel = net_config['entropy_bottleneck']  # 应该为 8
+        self.eb_channel = net_config['entropy_bottleneck']
         self.entropy_bottleneck = EntropyBottleneck(self.eb_channel)
         self.thres_dist = np.ceil((1 / self.scaling_ratio) * 0.65) if self.scaling_ratio < 0.5 else 1
 
         self.point_mul = net_config.get('point_mul', 5)
         self.skip_mode = net_config.get('skip_mode', False)
-        if syntax.phase.lower() == 'train':
+        self.noise = 0.0
+        if syntax.phase.lower() == 'train': # additive noise, only exist when training
             self.noise = net_config.get('noise', -1)
 
-        net_config['res_enc']['k'] = net_config['res_dec']['num_points'] = self.point_mul
+        # ===== DEBUG: print raw net_config before patch =====
+        print("\n[DEBUG][BEFORE PATCH] net_config['res_dec'] =", net_config.get('res_dec', None))
+        print("[DEBUG][BEFORE PATCH] net_config['vox_dec'] =", net_config.get('vox_dec', None))
+        print("[DEBUG][BEFORE PATCH] point_mul =", self.point_mul)
+        # Overwrite/Populate some parameters to the sub-modules
+        net_config['res_enc']['k'] =  net_config['res_dec']['num_points'] = self.point_mul
         net_config['res_enc']['thres_dist'] = self.thres_dist
         net_config['res_dec']['dims'][0] = net_config['vox_dec']['dims'][-1]
 
-        # 模块实例化
+        # ===== DEBUG: print net_config after patch =====
+        print("\n[DEBUG][AFTER PATCH] net_config['res_dec'] =", net_config.get('res_dec', None))
+        print("[DEBUG][AFTER PATCH] net_config['res_enc'] =", net_config.get('res_enc', None))
+        print("[DEBUG][AFTER PATCH] net_config['vox_dec'] =", net_config.get('vox_dec', None))
+        print("[DEBUG][AFTER PATCH] point_mul =", self.point_mul)
+        print()
+
+        # Construct the network modules
         self.res_dec = get_module_class(net_config['res_dec']['model'], False)(net_config['res_dec'], syntax=syntax)
         self.vox_dec = get_module_class(net_config['vox_dec']['model'], False)(net_config['vox_dec'], syntax=syntax)
         self.pool = ME.MinkowskiMaxPooling(kernel_size=2, stride=2, dimension=3)
@@ -42,91 +67,185 @@ class GeoResCompression(nn.Module):
             self.vox_enc = get_module_class(net_config['vox_enc']['model'], False)(net_config['vox_enc'], syntax=syntax)
             self.res_enc = get_module_class(net_config['res_enc']['model'], False)(net_config['res_enc'], syntax=syntax)
 
-    def forward(self, input_pc, return_loss=True):
-        """
-        修改后的 Forward：支持 [B, N, 3] 输入，输出 [B, 513, 8]
-        """
-        device = input_pc.device
 
-        # 1. 适配 PointLLM：将 [B, N, 3] 转为 ME.SparseTensor
-        # 注意：这里不再使用原代码诡异的 cumsum 逻辑，改用标准的 Batch Index 构造
-        if input_pc.dim() == 3:
-            batch_size, num_points, _ = input_pc.shape
-            # 坐标放大 64 倍以确保在 Minkowski 整数网格中有足够的体素
-            coords_scaled = (input_pc[:, :, :3] * 64.0).int()
+    def forward(self, coords):
+        # Construct coordnates from sparse tensor
+        coords[0][0] = 0
+        coords[:, 0] = torch.cumsum(coords[:,0], 0)
+        device = coords.device
+        x = ME.SparseTensor(
+            features=torch.ones(coords.shape[0], 1, device=device, dtype=torch.float32),
+            coordinates=coords, 
+            device=device)
 
-            # 构造带 Batch Index 的坐标 [B*N, 4]
-            batch_indices = torch.arange(batch_size, device=device).view(-1, 1, 1).repeat(1, num_points, 1)
-            me_coords = torch.cat([batch_indices, coords_scaled], dim=-1).view(-1, 4)
-
-            x = ME.SparseTensor(
-                features=torch.ones(me_coords.shape[0], 1, device=device),
-                coordinates=me_coords,
-                device=device)
-        else:
-            x = input_pc  # 兼容处理
-            batch_size = int(x.C[:, 0].max().item() + 1)
-
-        # 2. 几何分析层 (GraspNet 核心)
+        # This is to emulate the base layer
         with torch.no_grad():
+            # Quantization
             x_coarse = scale_sparse_tensor_batch(x, factor=self.scaling_ratio)
             x_coarse = sort_sparse_tensor_with_dir(x_coarse)
-            x_coarse_deq = torch.hstack((x_coarse.C[:, 0:1], (x_coarse.C[:, 1:].float() / self.scaling_ratio)))
+            # x_coarse is supposed to be encoded losslessly here, followed by dequantization
+            x_coarse_deq = torch.hstack((x_coarse.C[:, 0:1], (x_coarse.C[:, 1:] / self.scaling_ratio)))
 
-        # 3. 提取特征 (Enhancement Layer)
-        if self.skip_mode == False:
-            feat = self.res_enc(x.C.float(), x_coarse_deq.float())
-            x_feat = ME.SparseTensor(
+        # Enhancement layer begins
+        if self.skip_mode==False:
+            # x.C : (M, 4) int32 => [b, x, y, z]
+            # x.C : (M,4) int32 [b,x,y,z]
+            x_orig_f = x.C.float()  # (M,4) float, still has batch column
+            x_coarse_f = x_coarse_deq.float()  # (Mc,4) float, still has batch column
+
+            feat = self.res_enc(x_orig_f, x_coarse_f)
+
+            # extract the geometric residual and perform encoding
+            x_feat = ME.SparseTensor( # coarse point cloud with geometric features attached
                 features=feat,
                 coordinate_manager=x_coarse.coordinate_manager,
                 coordinate_map_key=x_coarse.coordinate_map_key)
-            y = self.vox_enc(x_feat)
+            y = self.vox_enc(x_feat) # feature encoder
             y_q, likelihood = get_likelihood(self.entropy_bottleneck, y)
+
+        else: # skip mode
+            x_coarse_ds = self.pool(x_coarse if self.dus == 1 else self.pool(x_coarse)) 
+            ds_shape = torch.Size((x_coarse_ds.shape[0], self.eb_channel))
+
+            y_q = ME.SparseTensor( # synthesized features for upsampling
+                features=torch.ones(ds_shape, device=device),
+                coordinate_manager=x_coarse_ds.coordinate_manager,
+                coordinate_map_key=x_coarse_ds.coordinate_map_key
+            )
+            likelihood = torch.ones(ds_shape, device=device)
+
+        # Decoder
+        res = self.vox_dec(y_q, x_coarse) # feature decoder
+        res = self.res_dec(res) # feature-to-res converter
+        res = sort_sparse_tensor_with_dir(res).F
+        res = res.reshape([res.shape[0] * self.point_mul, 3])
+        if self.noise > 0: # add uniform noise for robustness
+            res += (torch.rand(res.shape, device=device) - 0.5) * self.noise
+
+        # Add back the residual
+        out = x_coarse_deq.repeat_interleave(self.point_mul, dim=0)
+        # out[:, 1:] += res
+        if res is None:
+            pass
         else:
-            y_q, likelihood = x, torch.tensor(1.0, device=device)
-
-        # --- [核心修改：稀疏到定长的对齐逻辑] ---
-        # y_q.F 是所有 batch 压扁后的特征 [Total_Voxels, 8]
-        # y_q.C 是对应的坐标 [Total_Voxels, 4]
-        y_f, y_c = y_q.F, y_q.C
-        target_n = 513
-        target_dim = self.eb_channel  # 应该为 8
-
-        # 结果容器 [B, 513, 8]
-        hat_f_seq = torch.zeros((batch_size, target_n, target_dim), device=device)
-
-        # 按 Batch 分发特征
-        for b in range(batch_size):
-            mask = (y_c[:, 0] == b)
-            batch_feat = y_f[mask]
-
-            if batch_feat.shape[0] > 0:
-                # 使用插值确保每个 batch 都有 513 个 Token
-                # 哪怕 Grasp 实际上只压缩出了 100 个点，插值也会让它变成 513 个
-                if batch_feat.dim() == 1: batch_feat = batch_feat.unsqueeze(0)
-                feat_input = batch_feat.unsqueeze(0).transpose(1, 2)  # [1, 8, N]
-                upsampled = F.interpolate(feat_input, size=target_n, mode='linear', align_corners=False)
-                hat_f_seq[b] = upsampled.squeeze(0).transpose(0, 1)
-
-        # 4. 返回符合 PointLLM 预期的格式
-        if return_loss:
-            # 计算比特率损失 (Rate Loss)
-            if isinstance(likelihood, dict):
-                l_val = likelihood.get('feats', torch.tensor(1.0, device=device))
+            if out.shape[0] == res.shape[0]:
+                out[:, 1:] += res
             else:
-                l_val = likelihood
-            R_loss = -torch.log2(l_val + 1e-6).mean()
-            return hat_f_seq, R_loss, torch.tensor(0.0, device=device)
+                # 兜底：shape 不一致时不要炸
+                # 选择一种策略：
+                # A) 只加前 min 行（最保守、不会报错）
+                m = min(out.shape[0], res.shape[0])
+                out[:m, 1:] += res[:m]
 
-        return hat_f_seq
+        return {
+            'x_hat': out,
+            'gt': coords,
+            'likelihoods': {'feats': likelihood},
+            'y_q_F': y_q.F,  # ✅ 新增：latent features
+            'y_q_C': y_q.C  # （可选）坐标，debug 用
+        }
+
+    def compress(self, x, tag):
+        """
+        This function performs actual compression with learned statistics of the entropy bottleneck, consumes one point cloud at a time.
+        """
+
+        # Start the compression here
+        x_coarse = scale_sparse_tensor(x, factor=self.scaling_ratio)
+        filename_base = tag + '_B.bin'
+        start = time.monotonic()
+        coord_codec(filename_base, x_coarse.C.detach().cpu()[:, 1:]) # encode with G-PCC losslessly
+        base_enc_time = time.monotonic() - start
+        if self.skip_mode: # handle the skip mode
+            string, min_v, max_v, shape = None, None, None, None
+            del x
+            torch.cuda.empty_cache()
+        else:
+            x_coarse_deq = (x_coarse.C[:, 1:] / self.scaling_ratio).float().unsqueeze(0).contiguous() # + (self.scaling_ratio / 2)
+            x_c = x.C[:, 1:].float().unsqueeze(0)
+            del x
+            torch.cuda.empty_cache()
+            feat = self.res_enc(x_c, x_coarse_deq) # extract the geometric residual and perform encoding
+
+            # Build low coarse point cloud with feat
+            x_feat = ME.SparseTensor( # low bitdepth PC with attr
+                    features=feat,
+                    coordinate_manager=x_coarse.coordinate_manager,
+                    coordinate_map_key=x_coarse.coordinate_map_key)
+
+            y = self.vox_enc(x_feat) # voxel encoder
+            y = sort_sparse_tensor_with_dir(y)
+            shape = y.F.shape
+            string, min_v, max_v = self.entropy_bottleneck.compress(y.F.cpu())
+
+        return filename_base, [string], [min_v], [max_v], [shape], x_coarse.shape[0], base_enc_time
 
 
-# 保持原有的 get_likelihood 函数不变
+    def decompress(self, filename_base, string, min_v, max_v, shape, base_dec_time):
+        """
+        This function performs actual decompression with learned statistics of the entropy bottleneck, consumes one point cloud at a time.
+        """
+        start = time.monotonic()
+        y_C = coord_codec(filename_base) # decode with G-PCC losslessly
+        base_dec_time[0] = time.monotonic() - start
+        y_C = torch.cat((torch.zeros((len(y_C), 1)).int(), torch.tensor(y_C).int()), dim=-1)
+        if self.skip_mode and self.base_only:
+            y_C = (y_C[:, 1:] / self.scaling_ratio).float().contiguous()
+            return y_C
+
+        # From y_C, create the downsampled versions of y_C for decoding
+        device = next(self.parameters()).device
+        y_dummy = ME.SparseTensor(
+                features=torch.ones((y_C.shape[0], 1), device=device),
+                coordinates=y_C, 
+                tensor_stride=1, 
+                device=device
+            )
+        del y_C
+        torch.cuda.empty_cache()
+
+        y_ds = self.pool(y_dummy if self.dus == 1 else self.pool(y_dummy)) 
+        if self.skip_mode: # super-resolution
+            y_down = ME.SparseTensor(
+                    features=torch.ones((y_ds.shape[0], self.eb_channel), device=device),
+                    coordinate_manager=y_ds.coordinate_manager,
+                    coordinate_map_key=y_ds.coordinate_map_key
+                )
+        else:
+            y_ds = sort_sparse_tensor_with_dir(y_ds)
+            y_F = self.entropy_bottleneck.decompress(string[0], min_v[0], max_v[0], shape[0], channels=shape[0][-1])
+            y_down = ME.SparseTensor(features=y_F, device=device,
+                coordinate_manager=y_ds.coordinate_manager,
+                coordinate_map_key=y_ds.coordinate_map_key)
+
+        y_dec = self.vox_dec(y_down, y_dummy) # feature decoder
+        y_dec = self.res_dec(y_dec)
+        y_dec_F = y_dec.F.reshape(-1, 3) # take out the decoded coordinates
+        y_dec_C = (y_dec.C[:, 1:] / self.scaling_ratio).float().contiguous() # + (self.scaling_ratio / 2)
+
+        out = y_dec_C.repeat_interleave(self.point_mul, dim=0) + y_dec_F
+        return out
+
+
+def coord_codec(bin_filename, coords=None):
+    ply_filename = bin_filename + '.ply'
+    if coords == None: # decode
+        gpcc_decode(bin_filename, ply_filename)
+        out = read_ply_ascii_geo(ply_filename)
+    else: # encode
+        coords = coords.numpy().astype('int')
+        write_ply_ascii_geo(filedir=ply_filename, coords=coords)
+        gpcc_encode(ply_filename, bin_filename)
+        out = bin_filename
+    os.system('rm '+ ply_filename)
+    return out
+
+
 def get_likelihood(entropy_bottleneck, data):
     data_F, likelihood = entropy_bottleneck(data.F, quantize_mode="noise")
     data_Q = ME.SparseTensor(
-        features=data_F,
-        coordinate_map_key=data.coordinate_map_key,
+        features=data_F, 
+        coordinate_map_key=data.coordinate_map_key, 
         coordinate_manager=data.coordinate_manager,
         device=data.device)
     return data_Q, likelihood

@@ -86,13 +86,13 @@ class MinkowskiChannelwiseConvolution(MinkowskiModuleBase):
             input tensor.
 
             :attr:`kernel_size` (int, optional): the size of the kernel in the
-            output tensor. If not provided, :attr:`region_offset` should be
+            RunsenXu_graspnet_enc_dec_r04 tensor. If not provided, :attr:`region_offset` should be
             :attr:`RegionType.CUSTOM` and :attr:`region_offset` should be a 2D
             matrix with size :math:`N\times D` such that it lists all :math:`N`
             offsets in D-dimension.
 
             :attr:`stride` (int, or list, optional): stride size of the
-            convolution layer. If non-identity is used, the output coordinates
+            convolution layer. If non-identity is used, the RunsenXu_graspnet_enc_dec_r04 coordinates
             will be at least :attr:`stride` :math:`\times` :attr:`tensor_stride`
             away. When a list is given, the length must be D; each element will
             be used for stride size for the specific axis.

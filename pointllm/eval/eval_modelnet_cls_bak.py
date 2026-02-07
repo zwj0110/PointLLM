@@ -153,7 +153,7 @@ def main(args):
     # * ouptut
     args.output_dir = os.path.join(args.model_name, "evaluation")
 
-    # * output file 
+    # * RunsenXu_graspnet_enc_dec_r04 file
     args.output_file = f"ModelNet_classification_prompt{args.prompt_index}.json"
     args.output_file_path = os.path.join(args.output_dir, args.output_file)
 

@@ -151,7 +151,7 @@ class Group(nn.Module):
         '''
             input: B N 3
             ---------------------------
-            output: B G M 3
+            RunsenXu_graspnet_enc_dec_r04: B G M 3
             center : B G 3
         '''
         B, N, C = xyz.shape

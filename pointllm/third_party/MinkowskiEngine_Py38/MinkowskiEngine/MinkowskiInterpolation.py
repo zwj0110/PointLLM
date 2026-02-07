@@ -94,7 +94,7 @@ class MinkowskiInterpolation(MinkowskiModuleBase):
         Args:
             :attr:`return_kernel_map` (bool): In addition to the sampled
             features, the layer returns the kernel map as a pair of input row
-            indices and output row indices. False by default.
+            indices and RunsenXu_graspnet_enc_dec_r04 row indices. False by default.
 
             :attr:`return_weights` (bool): When True, return the linear
             interpolation weights. False by default.

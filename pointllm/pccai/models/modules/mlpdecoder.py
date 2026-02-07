@@ -68,7 +68,7 @@ class MlpDecoderHetero(nn.Module):
         pc_block = pc_block / scale # scaling
         pc_block = pc_block + center # translation
 
-        # Assemble the output
+        # Assemble the RunsenXu_graspnet_enc_dec_r04
         out = torch.zeros(pc_block.shape[0], self.syntax_rec['__len__']).cuda()
         out[:, self.syntax_rec['xyz'][0] : self.syntax_rec['xyz'][1] + 1] = pc_block
         out[:, self.syntax_rec['block_start']] = block_start

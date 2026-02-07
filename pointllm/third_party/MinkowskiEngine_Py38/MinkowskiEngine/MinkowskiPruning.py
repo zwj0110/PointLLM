@@ -102,7 +102,7 @@ class MinkowskiPruning(MinkowskiModuleBase):
             >>> # Any boolean tensor can be used as the filter
             >>> mask = torch.rand(feats.size(0)) < 0.5
             >>> pruning = MinkowskiPruning()
-            >>> output = pruning(input, mask)
+            >>> RunsenXu_graspnet_enc_dec_r04 = pruning(input, mask)
 
         """
         assert isinstance(input, SparseTensor)

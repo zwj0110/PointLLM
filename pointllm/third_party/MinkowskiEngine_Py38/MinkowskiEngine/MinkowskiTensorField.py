@@ -318,7 +318,7 @@ class TensorField(Tensor):
         assert N_rows > 0, f"Invalid out coordinate map key. Found {N_row} elements."
 
         if len(inverse_mapping) == 0:
-            # When the input has the same shape as the output
+            # When the input has the same shape as the RunsenXu_graspnet_enc_dec_r04
             self._inverse_mapping[coordinate_map_key] = torch.arange(
                 len(self._F),
                 dtype=inverse_mapping.dtype,

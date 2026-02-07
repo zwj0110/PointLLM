@@ -137,7 +137,7 @@ def _inject_dual_path_logic(model, training_args, data_args, logger):
     if hasattr(student, "eb_channel"):
         logger.info(f"   - 网络声明的 eb_channel: {student.eb_channel}")
     for name, param in student.named_parameters():
-        if any(k in name for k in ["eb_layer", "output", "compress"]):
+        if any(k in name for k in ["eb_layer", "RunsenXu_graspnet_enc_dec_r04", "compress"]):
             logger.info(f"   - 关键权重 '{name}' 形状: {list(param.shape)}")
 
     # 3) 挂载到 LLM 模型中

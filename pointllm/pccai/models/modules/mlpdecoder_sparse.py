@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import MinkowskiEngine as ME
+from .adapters import MinkowskiAdapter
 
 def make_pointwise_mlp_sparse(dims, doLastRelu=False):
     """
@@ -33,8 +34,21 @@ class MlpDecoderSparse(nn.Module):
         super(MlpDecoderSparse, self).__init__()
         self.num_points = net_config['num_points']
         dims = net_config['dims']
-        self.mlp = make_pointwise_mlp_sparse(dims + [3 * self.num_points], doLastRelu=False) # the MLP layers
+
+        # 计算最终输出通道数
+        final_dim = 3 * self.num_points
+
+        self.mlp = make_pointwise_mlp_sparse(dims + [final_dim], doLastRelu=False)  # the MLP layers
+
+        # [MODIFIED] 2. 初始化 Adapter
+        # 因为这里的输入输出都是 SparseTensor，所以用 MinkowskiAdapter
+        # 输出维度是 3 * num_points，这就是 Adapter 需要处理的 channel 数
+        self.adapter = MinkowskiAdapter(channels=final_dim)
 
     def forward(self, x):
-        out = self.mlp(x) # BatchSize X PointNum X 3
+        out = self.mlp(x)  # BatchSize X PointNum X 3
+
+        # [MODIFIED] 3. 应用 Adapter
+        out = self.adapter(out)
+
         return out

@@ -118,7 +118,7 @@ if __name__ == '__main__':
     parser.add_argument("--ckptdir", default='ckpts/r3_0.10bpp.pth')
     parser.add_argument("--filedir", default='../../../testdata/8iVFB/longdress_vox10_1300.ply')
     parser.add_argument("--scaling_factor", type=float, default=1.0, help='scaling_factor')
-    parser.add_argument("--rho", type=float, default=1.0, help='the ratio of the number of output points to the number of input points')
+    parser.add_argument("--rho", type=float, default=1.0, help='the ratio of the number of RunsenXu_graspnet_enc_dec_r04 points to the number of input points')
     parser.add_argument("--res", type=int, default=1024, help='resolution')
     args = parser.parse_args()
     filedir = args.filedir
@@ -128,7 +128,7 @@ if __name__ == '__main__':
     x = load_sparse_tensor(filedir, device)
     print('Loading Time:\t', round(time.time() - start_time, 4), 's')
 
-    outdir = './output'
+    outdir = './RunsenXu_graspnet_enc_dec_r04'
     if not os.path.exists(outdir): os.makedirs(outdir)
     filename = os.path.split(filedir)[-1].split('.')[0]
     filename = os.path.join(outdir, filename)

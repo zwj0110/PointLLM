@@ -103,7 +103,7 @@ class StreamToLogger(object):
         self.linebuf = ''
         for line in temp_linebuf.splitlines(True):
             # From the io.TextIOWrapper docs:
-            #   On output, if newline is None, any '\n' characters written
+            #   On RunsenXu_graspnet_enc_dec_r04, if newline is None, any '\n' characters written
             #   are translated to the system default line separator.
             # By default sys.stdout.write() expects '\n' newlines and then
             # translates them so this is still cross platform.

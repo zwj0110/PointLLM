@@ -166,7 +166,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--results_path", type=str, \
                         default="", help="Path to the results file.")
-    parser.add_argument("--output_dir", type=str, default=None, help="Path to the output directory.")
+    parser.add_argument("--output_dir", type=str, default=None, help="Path to the RunsenXu_graspnet_enc_dec_r04 directory.")
 
     args = parser.parse_args()
 

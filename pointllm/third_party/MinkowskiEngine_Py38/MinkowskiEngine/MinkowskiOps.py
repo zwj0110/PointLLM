@@ -151,7 +151,7 @@ def cat(*sparse_tensors):
        >>> import MinkowskiEngine as ME
        >>> sin = ME.SparseTensor(feats, coords)
        >>> sin2 = ME.SparseTensor(feats2, coordinate_map_key=sin.coordinate_map_key, coordinate_mananger=sin.coordinate_manager)
-       >>> sout = UNet(sin)  # Returns an output sparse tensor on the same coordinates
+       >>> sout = UNet(sin)  # Returns an RunsenXu_graspnet_enc_dec_r04 sparse tensor on the same coordinates
        >>> sout2 = ME.cat(sin, sin2, sout)  # Can concatenate multiple sparse tensors
 
     """
@@ -171,7 +171,7 @@ def _sum(*sparse_tensors):
        >>> import MinkowskiEngine as ME
        >>> sin = ME.SparseTensor(feats, coords)
        >>> sin2 = ME.SparseTensor(feats2, coordinate_map_key=sin.coordinate_map_key, coordinate_manager=sin.coordinate_manager)
-       >>> sout = UNet(sin)  # Returns an output sparse tensor on the same coordinates
+       >>> sout = UNet(sin)  # Returns an RunsenXu_graspnet_enc_dec_r04 sparse tensor on the same coordinates
        >>> sout2 = ME.sum(sin, sin2, sout)  # Can concatenate multiple sparse tensors
 
     """
@@ -198,7 +198,7 @@ def mean(*sparse_tensors):
        >>> import MinkowskiEngine as ME
        >>> sin = ME.SparseTensor(feats, coords)
        >>> sin2 = ME.SparseTensor(feats2, coordinate_map_key=sin.coordinate_map_key, coordinate_manager=sin.coordinate_manager)
-       >>> sout = UNet(sin)  # Returns an output sparse tensor on the same coordinates
+       >>> sout = UNet(sin)  # Returns an RunsenXu_graspnet_enc_dec_r04 sparse tensor on the same coordinates
        >>> sout2 = ME.mean(sin, sin2, sout)  # Can concatenate multiple sparse tensors
 
     """
@@ -225,7 +225,7 @@ def var(*sparse_tensors):
        >>> import MinkowskiEngine as ME
        >>> sin = ME.SparseTensor(feats, coords)
        >>> sin2 = ME.SparseTensor(feats2, coordinate_map_key=sin.coordinate_map_key, coordinate_manager=sin.coordinate_manager)
-       >>> sout = UNet(sin)  # Returns an output sparse tensor on the same coordinates
+       >>> sout = UNet(sin)  # Returns an RunsenXu_graspnet_enc_dec_r04 sparse tensor on the same coordinates
        >>> sout2 = ME.var(sin, sin2, sout)  # Can concatenate multiple sparse tensors
 
     """
@@ -439,8 +439,8 @@ class MinkowskiToDenseTensor(MinkowskiModuleBase):
 
        >>> for i in range(5):
        >>>     print(f"Iteration: {i}")
-       >>>     output = network(dense_tensor) # returns a regular pytorch tensor
-       >>>     output.sum().backward()
+       >>>     RunsenXu_graspnet_enc_dec_r04 = network(dense_tensor) # returns a regular pytorch tensor
+       >>>     RunsenXu_graspnet_enc_dec_r04.sum().backward()
 
     """
 

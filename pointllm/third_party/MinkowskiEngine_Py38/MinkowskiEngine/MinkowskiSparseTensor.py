@@ -306,7 +306,7 @@ class SparseTensor(Tensor):
         coordinates = coordinates[self.unique_index]
 
         if len(inverse_mapping) == 0:
-            # When the input has the same shape as the output
+            # When the input has the same shape as the RunsenXu_graspnet_enc_dec_r04
             self.inverse_mapping = torch.arange(
                 len(features),
                 dtype=inverse_mapping.dtype,
@@ -351,14 +351,14 @@ class SparseTensor(Tensor):
 
         Args:
             :attr:`min_coords` (torch.IntTensor, optional): The min
-            coordinates of the output sparse tensor. Must be divisible by the
+            coordinates of the RunsenXu_graspnet_enc_dec_r04 sparse tensor. Must be divisible by the
             current :attr:`tensor_stride`.
 
             :attr:`max_coords` (torch.IntTensor, optional): The max coordinates
-            of the output sparse tensor (inclusive). Must be divisible by the
+            of the RunsenXu_graspnet_enc_dec_r04 sparse tensor (inclusive). Must be divisible by the
             current :attr:`tensor_stride`.
 
-            :attr:`contract_coords` (bool, optional): Given True, the output
+            :attr:`contract_coords` (bool, optional): Given True, the RunsenXu_graspnet_enc_dec_r04
             coordinates will be divided by the tensor stride to make features
             contiguous.
 
@@ -369,7 +369,7 @@ class SparseTensor(Tensor):
             `min_coord + tensor_stride * [the coordinate of the dense tensor]`.
 
             :attr:`min_coords` (torch.IntTensor): the D-dimensional vector
-            defining the minimum coordinate of the output sparse tensor. If
+            defining the minimum coordinate of the RunsenXu_graspnet_enc_dec_r04 sparse tensor. If
             :attr:`contract_coords` is True, the :attr:`min_coords` will also
             be contracted.
 
@@ -462,13 +462,13 @@ class SparseTensor(Tensor):
         tensor.
 
         Args:
-            :attr:`shape` (torch.Size, optional): The size of the output tensor.
+            :attr:`shape` (torch.Size, optional): The size of the RunsenXu_graspnet_enc_dec_r04 tensor.
 
             :attr:`min_coordinate` (torch.IntTensor, optional): The min
-            coordinates of the output sparse tensor. Must be divisible by the
+            coordinates of the RunsenXu_graspnet_enc_dec_r04 sparse tensor. Must be divisible by the
             current :attr:`tensor_stride`. If 0 is given, it will use the origin for the min coordinate.
 
-            :attr:`contract_stride` (bool, optional): The output coordinates
+            :attr:`contract_stride` (bool, optional): The RunsenXu_graspnet_enc_dec_r04 coordinates
             will be divided by the tensor stride to make features spatially
             contiguous. True by default.
 
@@ -479,7 +479,7 @@ class SparseTensor(Tensor):
             [the coordinate of the dense tensor]`.
 
             :attr:`min_coordinate` (torch.IntTensor): the D-dimensional vector
-            defining the minimum coordinate of the output tensor.
+            defining the minimum coordinate of the RunsenXu_graspnet_enc_dec_r04 tensor.
 
             :attr:`tensor_stride` (torch.IntTensor): the D-dimensional vector
             defining the stride between tensor elements.

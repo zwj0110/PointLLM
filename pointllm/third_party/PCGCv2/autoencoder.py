@@ -1,9 +1,65 @@
 import torch
+import torch.nn as nn
 import MinkowskiEngine as ME
 
 from data_utils import isin, istopk
 
+class MinkowskiAdapter(nn.Module):
+    """
+    Implementation of the 'Purple Adapter' from the GRASP-Net diagram.
+    Structure: SConv(1x1, C->C/8) -> ReLU -> SConv(1x1, C/8->C) -> Residual Add
+    """
+    def __init__(
+            self,
+            channels: int,
+            ratio: int = 8,
+            use_alpha: bool = True,
+            alpha_init: float = 1.0,
+            enabled: bool = True,
+    ):
+        super().__init__()
+        self.enabled = enabled
+        hidden_dim = max(1, channels // int(ratio))
 
+        self.conv1 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=hidden_dim,
+            kernel_size=1,
+            stride=1,
+            bias=True,
+            dimension=3,
+        )
+        self.act = ME.MinkowskiReLU(inplace=True)
+        self.conv2 = ME.MinkowskiConvolution(
+            in_channels=hidden_dim,
+            out_channels=channels,
+            kernel_size=1,
+            stride=1,
+            bias=True,
+            dimension=3,
+        )
+        if use_alpha:
+            self.alpha = nn.Parameter(torch.tensor([alpha_init], dtype=torch.float32))
+        else:
+            self.register_parameter("alpha", None)
+        self._init_weights()
+
+    def _init_weights(self):
+        with torch.no_grad():
+            if hasattr(self.conv2, "kernel") and self.conv2.kernel is not None:
+                self.conv2.kernel.zero_()
+            if hasattr(self.conv2, "bias") and self.conv2.bias is not None:
+                self.conv2.bias.zero_()
+
+    def forward(self, x):
+        if not self.enabled: return x
+        out = self.conv1(x)
+        out = self.act(out)
+        out = self.conv2(out)
+        if self.alpha is not None:
+            gate = torch.tanh(self.alpha)
+            out = out * gate
+        return x + out
 class InceptionResNet(torch.nn.Module):
     """Inception Residual Network
     """
@@ -48,13 +104,19 @@ class InceptionResNet(torch.nn.Module):
             dimension=3)
 
         self.relu = ME.MinkowskiReLU(inplace=True)
+        self.adapter = MinkowskiAdapter(channels=channels)
         
     def forward(self, x):
         out0 = self.conv0_1(self.relu(self.conv0_0(x)))
         out1 = self.conv1_2(self.relu(self.conv1_1(self.relu(self.conv1_0(x)))))
-        out = ME.cat(out0, out1) + x
+        # Concat
+        out = ME.cat(out0, out1)
 
-        return out
+        # ✅ [NEW] 3. 插入 Adapter
+        # [Cite: Source 74] "the purple adapter can be added here, before + x"
+        out = self.adapter(out)
+
+        return out + x
 
 def make_layer(block, block_layers, channels):
     """make stacked InceptionResNet layers.

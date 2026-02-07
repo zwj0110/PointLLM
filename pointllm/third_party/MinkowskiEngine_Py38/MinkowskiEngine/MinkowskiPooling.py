@@ -202,16 +202,16 @@ class MinkowskiAvgPooling(MinkowskiPoolingBase):
         \mathcal{C}^\text{in})} \mathbf{x}_{\mathbf{u} + \mathbf{i}}
         \; \text{for} \; \mathbf{u} \in \mathcal{C}^\text{out}
 
-    For each output :math:`\mathbf{u}` in :math:`\mathcal{C}^\text{out}`,
+    For each RunsenXu_graspnet_enc_dec_r04 :math:`\mathbf{u}` in :math:`\mathcal{C}^\text{out}`,
     average input features.
 
     .. note::
 
         An average layer first computes the cardinality of the input features,
-        the number of input features for each output, and divide the sum of the
+        the number of input features for each RunsenXu_graspnet_enc_dec_r04, and divide the sum of the
         input features by the cardinality. For a dense tensor, the cardinality
         is a constant, the volume of a kernel. However, for a sparse tensor, the
-        cardinality varies depending on the number of input features per output.
+        cardinality varies depending on the number of input features per RunsenXu_graspnet_enc_dec_r04.
         Thus, the average pooling for a sparse tensor is not equivalent to the
         conventional average pooling layer for a dense tensor. Please refer to
         the :attr:`MinkowskiSumPooling` for the equivalent layer.
@@ -241,13 +241,13 @@ class MinkowskiAvgPooling(MinkowskiPoolingBase):
 
         Args:
             :attr:`kernel_size` (int, optional): the size of the kernel in the
-            output tensor. If not provided, :attr:`region_offset` should be
+            RunsenXu_graspnet_enc_dec_r04 tensor. If not provided, :attr:`region_offset` should be
             :attr:`RegionType.CUSTOM` and :attr:`region_offset` should be a 2D
             matrix with size :math:`N\times D` such that it lists all :math:`N`
             offsets in D-dimension.
 
             :attr:`stride` (int, or list, optional): stride size of the
-            convolution layer. If non-identity is used, the output coordinates
+            convolution layer. If non-identity is used, the RunsenXu_graspnet_enc_dec_r04 coordinates
             will be at least :attr:`stride` :math:`\times` :attr:`tensor_stride`
             away. When a list is given, the length must be D; each element will
             be used for stride size for the specific axis.
@@ -290,16 +290,16 @@ class MinkowskiSumPooling(MinkowskiPoolingBase):
         \mathcal{C}^\text{in})} \mathbf{x}_{\mathbf{u} + \mathbf{i}}
         \; \text{for} \; \mathbf{u} \in \mathcal{C}^\text{out}
 
-    For each output :math:`\mathbf{u}` in :math:`\mathcal{C}^\text{out}`,
+    For each RunsenXu_graspnet_enc_dec_r04 :math:`\mathbf{u}` in :math:`\mathcal{C}^\text{out}`,
     average input features.
 
     .. note::
 
         An average layer first computes the cardinality of the input features,
-        the number of input features for each output, and divide the sum of the
+        the number of input features for each RunsenXu_graspnet_enc_dec_r04, and divide the sum of the
         input features by the cardinality. For a dense tensor, the cardinality
         is a constant, the volume of a kernel. However, for a sparse tensor, the
-        cardinality varies depending on the number of input features per output.
+        cardinality varies depending on the number of input features per RunsenXu_graspnet_enc_dec_r04.
         Thus, averaging the input features with the cardinality may not be
         equivalent to the conventional average pooling for a dense tensor.
         This layer provides an alternative that does not divide the sum by the
@@ -326,13 +326,13 @@ class MinkowskiSumPooling(MinkowskiPoolingBase):
 
         Args:
             :attr:`kernel_size` (int, optional): the size of the kernel in the
-            output tensor. If not provided, :attr:`region_offset` should be
+            RunsenXu_graspnet_enc_dec_r04 tensor. If not provided, :attr:`region_offset` should be
             :attr:`RegionType.CUSTOM` and :attr:`region_offset` should be a 2D
             matrix with size :math:`N\times D` such that it lists all :math:`N`
             offsets in D-dimension.
 
             :attr:`stride` (int, or list, optional): stride size of the
-            convolution layer. If non-identity is used, the output coordinates
+            convolution layer. If non-identity is used, the RunsenXu_graspnet_enc_dec_r04 coordinates
             will be at least :attr:`stride` :math:`\times` :attr:`tensor_stride`
             away. When a list is given, the length must be D; each element will
             be used for stride size for the specific axis.
@@ -398,13 +398,13 @@ class MinkowskiMaxPooling(MinkowskiPoolingBase):
 
         Args:
             :attr:`kernel_size` (int, optional): the size of the kernel in the
-            output tensor. If not provided, :attr:`region_offset` should be
+            RunsenXu_graspnet_enc_dec_r04 tensor. If not provided, :attr:`region_offset` should be
             :attr:`RegionType.CUSTOM` and :attr:`region_offset` should be a 2D
             matrix with size :math:`N\times D` such that it lists all :math:`N`
             offsets in D-dimension.
 
             :attr:`stride` (int, or list, optional): stride size of the
-            convolution layer. If non-identity is used, the output coordinates
+            convolution layer. If non-identity is used, the RunsenXu_graspnet_enc_dec_r04 coordinates
             will be at least :attr:`stride` :math:`\times` :attr:`tensor_stride`
             away. When a list is given, the length must be D; each element will
             be used for stride size for the specific axis.
@@ -530,13 +530,13 @@ class MinkowskiPoolingTranspose(MinkowskiPoolingBase):
 
         Args:
             :attr:`kernel_size` (int, optional): the size of the kernel in the
-            output tensor. If not provided, :attr:`region_offset` should be
+            RunsenXu_graspnet_enc_dec_r04 tensor. If not provided, :attr:`region_offset` should be
             :attr:`RegionType.CUSTOM` and :attr:`region_offset` should be a 2D
             matrix with size :math:`N\times D` such that it lists all :math:`N`
             offsets in D-dimension.
 
             :attr:`stride` (int, or list, optional): stride size of the
-            convolution layer. If non-identity is used, the output coordinates
+            convolution layer. If non-identity is used, the RunsenXu_graspnet_enc_dec_r04 coordinates
             will be at least :attr:`stride` :math:`\times` :attr:`tensor_stride`
             away. When a list is given, the length must be D; each element will
             be used for stride size for the specific axis.
@@ -549,7 +549,7 @@ class MinkowskiPoolingTranspose(MinkowskiPoolingBase):
             optional): define custom kernel shape.
 
             :attr:`expand_coordinates` (bool, optional): Force generation of
-            new coordinates. When True, the output coordinates will be the
+            new coordinates. When True, the RunsenXu_graspnet_enc_dec_r04 coordinates will be the
             outer product of the kernel shape and the input coordinates.
             `False` by default.
 
@@ -630,7 +630,7 @@ class MinkowskiGlobalPoolingFunction(Function):
 
 
 class MinkowskiGlobalPooling(MinkowskiModuleBase):
-    r"""Pool all input features to one output."""
+    r"""Pool all input features to one RunsenXu_graspnet_enc_dec_r04."""
 
     def __init__(
         self, mode: PoolingMode = PoolingMode.GLOBAL_AVG_POOLING_PYTORCH_INDEX
@@ -702,7 +702,7 @@ class MinkowskiGlobalAvgPooling(MinkowskiGlobalPooling):
 
 
 class MinkowskiGlobalMaxPooling(MinkowskiGlobalPooling):
-    r"""Max pool all input features to one output feature at the origin.
+    r"""Max pool all input features to one RunsenXu_graspnet_enc_dec_r04 feature at the origin.
 
     .. math::
 

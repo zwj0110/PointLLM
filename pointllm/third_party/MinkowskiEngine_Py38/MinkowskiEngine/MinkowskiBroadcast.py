@@ -136,7 +136,7 @@ class MinkowskiBroadcastAddition(MinkowskiBroadcastBase):
 
 
     For all input :math:`\mathbf{x}_\mathbf{u}`, add :math:`\mathbf{x}_2`. The
-    output coordinates will be the same as the input coordinates
+    RunsenXu_graspnet_enc_dec_r04 coordinates will be the same as the input coordinates
     :math:`\mathcal{C}^\text{in} = \mathcal{C}^\text{out}`.
 
     .. note::
@@ -160,7 +160,7 @@ class MinkowskiBroadcastMultiplication(MinkowskiBroadcastBase):
 
 
     For all input :math:`\mathbf{x}_\mathbf{u}`, multiply :math:`\mathbf{x}_2`
-    element-wise. The output coordinates will be the same as the input
+    element-wise. The RunsenXu_graspnet_enc_dec_r04 coordinates will be the same as the input
     coordinates :math:`\mathcal{C}^\text{in} = \mathcal{C}^\text{out}`.
 
     .. note::
@@ -184,9 +184,9 @@ class MinkowskiBroadcast(Module):
 
 
     For all input :math:`\mathbf{x}_\mathbf{u}`, copy value :math:`\mathbf{x}_2`
-    element-wise. The output coordinates will be the same as the input
+    element-wise. The RunsenXu_graspnet_enc_dec_r04 coordinates will be the same as the input
     coordinates :math:`\mathcal{C}^\text{in} = \mathcal{C}^\text{out}`. The
-    first input :math:`\mathbf{x}_1` is only used for defining the output
+    first input :math:`\mathbf{x}_1` is only used for defining the RunsenXu_graspnet_enc_dec_r04
     coordinates.
 
     .. note::
@@ -226,7 +226,7 @@ class MinkowskiBroadcastConcatenation(MinkowskiBroadcast):
 
     For all input :math:`\mathbf{x}_\mathbf{u}`, concatenate vector
     :math:`\mathbf{x}_2`. :math:`[\cdot, \cdot]` is a concatenation operator.
-    The output coordinates will be the same as the input coordinates
+    The RunsenXu_graspnet_enc_dec_r04 coordinates will be the same as the input coordinates
     :math:`\mathcal{C}^\text{in} = \mathcal{C}^\text{out}`.
 
     .. note::

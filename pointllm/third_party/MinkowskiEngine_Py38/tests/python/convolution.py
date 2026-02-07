@@ -376,10 +376,10 @@ class TestConvolutionTranspose(unittest.TestCase):
 
         print("Initial input: ", input)
         input = conv(input)
-        print("Conv output: ", input)
+        print("Conv RunsenXu_graspnet_enc_dec_r04: ", input)
 
         output = conv_tr(input)
-        print("Conv tr output: ", output)
+        print("Conv tr RunsenXu_graspnet_enc_dec_r04: ", output)
 
         # Check backward
         fn = MinkowskiConvolutionTransposeFunction()
@@ -548,10 +548,10 @@ class TestGenerativeConvolutionTranspose(unittest.TestCase):
 
         print("Initial input: ", input)
         input = conv(input)
-        print("Conv output: ", input)
+        print("Conv RunsenXu_graspnet_enc_dec_r04: ", input)
 
         output = conv_tr(input)
-        print("Conv tr output: ", output)
+        print("Conv tr RunsenXu_graspnet_enc_dec_r04: ", output)
 
         # Check backward
         fn = MinkowskiConvolutionTransposeFunction()

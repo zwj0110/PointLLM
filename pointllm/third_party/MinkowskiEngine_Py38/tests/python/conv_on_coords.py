@@ -69,13 +69,13 @@ class TestConvolution(unittest.TestCase):
             dimension=D).double()
 
         print('Initial input: ', input)
-        print('Specified output coords: ', out_coords)
+        print('Specified RunsenXu_graspnet_enc_dec_r04 coords: ', out_coords)
         output = conv(input, out_coords)
 
         # To specify the tensor stride
         out_coords_key = cm.create_coords_key(out_coords, tensor_stride=2)
         output = conv(input, out_coords_key)
-        print('Conv output: ', output)
+        print('Conv RunsenXu_graspnet_enc_dec_r04: ', output)
 
         output.F.sum().backward()
         print(input.F.grad)
@@ -106,9 +106,9 @@ class TestConvolution(unittest.TestCase):
             bias=False,
             dimension=D).double()
         print('Initial input: ', input)
-        print('Specified output coords: ', out_coords)
+        print('Specified RunsenXu_graspnet_enc_dec_r04 coords: ', out_coords)
         output = conv_tr(input, out_coords)
-        print('Conv output: ', output)
+        print('Conv RunsenXu_graspnet_enc_dec_r04: ', output)
 
         output.F.sum().backward()
         print(input.F.grad)

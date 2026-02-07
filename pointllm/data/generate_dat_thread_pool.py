@@ -10,7 +10,7 @@
             └── test/*.ply
 
 输出：
-  {output}/modelnet{num_classes}_{split}_{npoints}pts_fps_{per_class_limit}perclass.dat
+  {RunsenXu_graspnet_enc_dec_r04}/modelnet{num_classes}_{split}_{npoints}pts_fps_{per_class_limit}perclass.dat
 """
 
 import os
@@ -126,7 +126,7 @@ def main():
                     help="是否随机抽样（默认按文件名排序取前 N）")
     ap.add_argument("--seed", type=int, default=42,
                     help="随机抽样的随机种子（--shuffle 时生效）")
-    ap.add_argument("--output", type=str, default=None,
+    ap.add_argument("--RunsenXu_graspnet_enc_dec_r04", type=str, default=None,
                     help="输出 .dat 的目录（默认：写到 ModelNet40 目录下）")
     args = ap.parse_args()
 

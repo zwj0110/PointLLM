@@ -1,0 +1,327 @@
+# -*- coding: utf-8 -*-
+"""
+pointllm_internal.py (FULL FILE REPLACEMENT)
+
+Key fix:
+- Make PointLLMLlamaInternalModel forward() compatible with multiple point_backbone return signatures:
+  (A) (hat_f_seq, R_loss, D_loss, MSE_loss)
+  (B) (hat_f_seq, R_loss, D_loss)
+  (C) (xyz_hat[B,N,3], R_loss, counts_list)   <-- GRASP recon wrapper style
+- For (C), we map xyz_hat -> backbone_dim using a frozen Linear(3 -> backbone_dim) named xyz_to_backbone.
+
+Also keeps your attention_mask "wake patch tokens" fix.
+"""
+
+import os
+import logging
+from dataclasses import dataclass
+from typing import Optional, Tuple, Any
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import LlamaConfig, LlamaModel, LlamaForCausalLM
+from transformers.modeling_outputs import CausalLMOutputWithPast
+
+from .adapters import ResidualMLPAdapter
+
+logger = logging.getLogger(__name__)
+
+# HuggingFace / LLaMA 系列里常用的 label mask index
+IGNORE_INDEX = -100
+
+
+@dataclass
+class PointLLMInternalOutput(CausalLMOutputWithPast):
+    loss: Optional[torch.FloatTensor] = None
+    mse_loss: Optional[torch.FloatTensor] = None
+    r_loss: Optional[torch.FloatTensor] = None
+    d_loss: Optional[torch.FloatTensor] = None
+
+
+class PointLLMInternalConfig(LlamaConfig):
+    model_type = "pointllm_internal"
+
+    def __init__(
+        self,
+        distill_alpha=1.0,
+        lambda_rec=1.0,
+        lambda_rate=0.01,
+        use_ce_loss: bool = False,
+        **kwargs
+    ):
+        # feature loss (student compressed vs teacher uncompressed)
+        self.distill_alpha = distill_alpha
+        # distortion loss
+        self.lambda_rec = lambda_rec
+        # rate loss
+        self.lambda_rate = lambda_rate
+        # default: turn OFF language CE loss for compression/distillation training
+        self.use_ce_loss = bool(use_ce_loss)
+
+        super(PointLLMInternalConfig, self).__init__(**kwargs)
+
+
+class PointLLMLlamaInternalModel(LlamaModel):
+    config_class = PointLLMInternalConfig
+
+    def __init__(self, config: LlamaConfig):
+        super(PointLLMLlamaInternalModel, self).__init__(config)
+        self.point_backbone = None
+
+        # 初始化 Projector
+        point_cfg = getattr(config, "point_backbone_config", None) or {}
+        self.backbone_dim = int(point_cfg.get("backbone_output_dim", 8))
+
+        self.intermediate_dim = 256
+        self.pre_proj_adapter = nn.Sequential(
+            nn.Linear(self.backbone_dim, self.intermediate_dim),
+            nn.ReLU(),
+            ResidualMLPAdapter(self.intermediate_dim, self.intermediate_dim),
+        )
+        self.point_proj = nn.Linear(self.intermediate_dim, config.hidden_size)
+
+        # For GRASP recon wrapper style: xyz -> backbone_dim (frozen, lazy init on first use)
+        self.xyz_to_backbone: Optional[nn.Linear] = None
+
+    def _lazy_init_xyz_to_backbone(self, device: torch.device):
+        if self.xyz_to_backbone is not None:
+            return
+        layer = nn.Linear(3, self.backbone_dim, bias=False).to(device)
+        for p in layer.parameters():
+            p.requires_grad = False
+        self.xyz_to_backbone = layer
+        logger.info(f"✅ [xyz_to_backbone] init frozen Linear(3 -> {self.backbone_dim})")
+
+    def _safe_replace_patch_tokens(
+        self, input_ids: torch.Tensor, inputs_embeds: torch.Tensor, point_features: torch.Tensor, patch_id: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        将 point_features 注入到 inputs_embeds，并返回 mask 供后续修正 attention_mask 使用
+        """
+        B, L = input_ids.shape
+        _, T, H = point_features.shape
+
+        # 1. 定位 Patch Token
+        mask = (input_ids == patch_id)
+        hit_count = int(mask.sum().item())
+
+        if hit_count == 0 and not self.training:
+            logger.error(f"🚨 [CRITICAL] Input IDs 中未找到 Patch ID {patch_id}！请检查 Tokenizer 配置。")
+            return inputs_embeds, mask
+
+        out = inputs_embeds.clone()
+        for b in range(B):
+            idx = torch.nonzero(mask[b], as_tuple=False).squeeze(-1)
+            if idx.numel() == 0:
+                continue
+
+            n = int(idx.numel())
+            if n > T:
+                idx = idx[:T]
+                n = T
+
+            feat = point_features[b, :n, :].to(out.dtype)
+            out[b, idx, :] = feat
+
+        return out, mask
+
+    def _unpack_point_backbone(
+        self, out: Any, device: torch.device, inputs_embeds_device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns: hat_f_seq, R_loss, D_loss, MSE_loss
+        Compatible with:
+          - (hat_f_seq, R_loss, D_loss, MSE_loss)
+          - (hat_f_seq, R_loss, D_loss)
+          - (xyz_hat[B,N,3], R_loss, counts_list)  <-- GRASP recon wrapper style
+        """
+        # defaults
+        R_loss = torch.tensor(0.0, device=inputs_embeds_device)
+        D_loss = torch.tensor(0.0, device=inputs_embeds_device)
+        MSE_loss = torch.tensor(0.0, device=inputs_embeds_device)
+
+        if not isinstance(out, (list, tuple)):
+            raise RuntimeError(f"Unsupported point_backbone return type: {type(out)}")
+
+        if len(out) == 4:
+            hat_f_seq, R_loss, D_loss, MSE_loss = out
+            return hat_f_seq, R_loss, D_loss, MSE_loss
+
+        if len(out) == 3:
+            a, b, c = out
+
+            # Case 1) (hat_f_seq, R_loss, D_loss)
+            if torch.is_tensor(a) and torch.is_tensor(b) and torch.is_tensor(c):
+                hat_f_seq, R_loss, D_loss = a, b, c
+                MSE_loss = torch.tensor(0.0, device=hat_f_seq.device)
+                return hat_f_seq, R_loss, D_loss, MSE_loss
+
+            # Case 2) GRASP recon wrapper: (xyz_hat[B,N,3], R_loss, counts[list])
+            if torch.is_tensor(a) and torch.is_tensor(b) and isinstance(c, list) and a.dim() == 3 and a.size(-1) == 3:
+                xyz_hat, R_loss, _counts = a, b, c
+                self._lazy_init_xyz_to_backbone(xyz_hat.device)
+                hat_f_seq = self.xyz_to_backbone(xyz_hat.float())  # [B,N,backbone_dim]
+                D_loss = torch.tensor(0.0, device=xyz_hat.device)
+                MSE_loss = torch.tensor(0.0, device=xyz_hat.device)
+                return hat_f_seq, R_loss, D_loss, MSE_loss
+
+            raise RuntimeError(
+                f"Unsupported point_backbone 3-tuple signature: "
+                f"types=({type(a)}, {type(b)}, {type(c)}) "
+                f"shapes=({getattr(a,'shape',None)}, {getattr(b,'shape',None)}, {None if not isinstance(c,list) else 'list'})"
+            )
+
+        raise RuntimeError(f"Unsupported point_backbone return length: {len(out)}")
+
+    def forward(self, input_ids=None, attention_mask=None, point_clouds=None, **kwargs):
+        # 如果没有点云输入，走标准流程
+        if self.point_backbone is None or point_clouds is None:
+            return super().forward(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+
+        point_cfg = getattr(self.config, "point_backbone_config", None) or {}
+
+        # 1) 生成基础 Embeddings
+        inputs_embeds = self.embed_tokens(input_ids)
+
+        # 2) Backbone forward (compat unpack)
+        out = self.point_backbone(point_clouds)
+        hat_f_seq, R_loss, D_loss, MSE_loss_val = self._unpack_point_backbone(
+            out, device=point_clouds.device, inputs_embeds_device=inputs_embeds.device
+        )
+
+        # 3) Projector: backbone_dim -> 256 -> hidden
+        adapter_dtype = next(self.pre_proj_adapter.parameters()).dtype
+        proj_in = hat_f_seq.to(adapter_dtype)
+        point_features = self.point_proj(self.pre_proj_adapter(proj_in))
+
+        # 4) 替换 Embeddings
+        patch_id = int(point_cfg.get("point_patch_token_id", -1))
+        if patch_id < 0:
+            if not self.training:
+                logger.error("🚨 point_patch_token_id is missing/invalid (<0). Please set it in model.config.point_backbone_config.")
+            # fall back: do nothing (still run LLM)
+            patch_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        else:
+            inputs_embeds, patch_mask = self._safe_replace_patch_tokens(
+                input_ids, inputs_embeds, point_features, patch_id
+            )
+
+        # 🚨 核心修复：强制修正 Attention Mask，让 LLM “看见” patch 位置
+        if attention_mask is not None and patch_mask is not None:
+            if patch_mask.device != attention_mask.device:
+                patch_mask = patch_mask.to(attention_mask.device)
+
+            if attention_mask.dim() == 2:
+                is_masked = (attention_mask[patch_mask] == 0)
+                if is_masked.any() and not self.training:
+                    logger.warning(f"🔧 [Auto-Fix] 强制唤醒 {int(is_masked.sum().item())} 个被 Mask 的视觉 Token")
+
+                attention_mask = attention_mask.clone()
+                attention_mask[patch_mask] = 1
+
+        compression_metrics = {
+            "R_loss": R_loss,
+            "D_loss": D_loss,
+            "MSE_loss": MSE_loss_val,
+        }
+
+        # 5) 调用父类 forward
+        # ⚠️ 必须显式传 input_ids=None，否则 LlamaModel 会优先使用 input_ids 重新计算 embedding
+        outputs = super().forward(
+            input_ids=None,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            **kwargs
+        )
+        setattr(outputs, "compression_metrics", compression_metrics)
+        return outputs
+
+
+class PointLLMLlamaForCausalLMInternal(LlamaForCausalLM):
+    config_class = PointLLMInternalConfig
+
+    def __init__(self, config):
+        super(PointLLMLlamaForCausalLMInternal, self).__init__(config)
+        self.model = PointLLMLlamaInternalModel(config)
+        self.post_init()
+
+    def forward(self, input_ids=None, attention_mask=None, labels=None, point_clouds=None, **kwargs):
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            point_clouds=point_clouds,
+            **kwargs
+        )
+        logits = self.lm_head(outputs[0])
+
+        metrics = getattr(outputs, "compression_metrics", None)
+        mse_val = torch.tensor(0.0, device=logits.device)  # feature loss
+        d_val = torch.tensor(0.0, device=logits.device)    # D
+        r_val = torch.tensor(0.0, device=logits.device)    # R
+
+        if metrics:
+            mse_val = metrics.get("MSE_loss", mse_val)
+            d_val = metrics.get("D_loss", d_val)
+            r_val = metrics.get("R_loss", r_val)
+
+            # be robust if these are python floats
+            if not torch.is_tensor(mse_val):
+                mse_val = torch.tensor(float(mse_val), device=logits.device)
+            if not torch.is_tensor(d_val):
+                d_val = torch.tensor(float(d_val), device=logits.device)
+            if not torch.is_tensor(r_val):
+                r_val = torch.tensor(float(r_val), device=logits.device)
+
+            mse_val = mse_val.to(device=logits.device).mean()
+            d_val = d_val.to(device=logits.device).mean()
+            r_val = r_val.to(device=logits.device).mean()
+
+        total_loss = None
+        ce_loss = torch.tensor(0.0, device=logits.device)
+
+        if labels is not None:
+            # CE 仍然算出来，便于 debug；但默认不加入 total loss
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss_fct = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
+            ce_loss = loss_fct(
+                shift_logits.view(-1, self.config.vocab_size),
+                shift_labels.view(-1)
+            )
+
+            total_loss = (
+                (ce_loss if getattr(self.config, "use_ce_loss", False) else 0.0)
+                + (self.config.distill_alpha * mse_val)
+                + (self.config.lambda_rec * d_val)
+                + (self.config.lambda_rate * r_val)
+            )
+
+            # Optional debug print
+            if int(os.environ.get("LOCAL_RANK", 0)) == 0 and bool(int(os.environ.get("POINTLLM_DEBUG", "0"))):
+                try:
+                    print(
+                        f"\r[TRAIN] "
+                        f"CE:{float(ce_loss.detach().cpu().item()):.3f} "
+                        f"| a*MSE:{float((self.config.distill_alpha*mse_val).detach().cpu().item()):.3f} "
+                        f"| rec*D:{float((self.config.lambda_rec*d_val).detach().cpu().item()):.3f} "
+                        f"| rate*R:{float((self.config.lambda_rate*r_val).detach().cpu().item()):.3f} "
+                        f"| Total:{float(total_loss.detach().cpu().item()):.3f}",
+                        end=""
+                    )
+                except Exception:
+                    pass
+
+        return PointLLMInternalOutput(
+            loss=total_loss,
+            logits=logits,
+            mse_loss=mse_val,
+            r_loss=r_val,
+            d_loss=d_val,
+            past_key_values=outputs.past_key_values,
+            hidden_states=getattr(outputs, "hidden_states", None),
+            attentions=getattr(outputs, "attentions", None),
+        )
+
+    def get_model(self):
+        return self.model

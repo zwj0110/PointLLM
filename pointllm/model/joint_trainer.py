@@ -26,7 +26,7 @@ class JointFeatureAlignmentTrainer:
         val_dataset=None,
         lr=1e-4,
         batch_size=8,
-        save_dir="./output",
+        save_dir="./RunsenXu_graspnet_enc_dec_r04",
         device=None,
         use_cosine=True,
         freeze_student_backbone=True,

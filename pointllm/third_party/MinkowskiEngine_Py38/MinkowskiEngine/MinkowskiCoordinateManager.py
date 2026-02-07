@@ -388,7 +388,7 @@ class CoordinateManager:
     ) -> dict:
         r"""Get kernel in-out maps for the specified coords keys or tensor strides.
 
-        returns dict{kernel_index: in_out_tensor} where in_out_tensor[0] is the input row indices that correspond to in_out_tensor[1], which is the row indices for output.
+        returns dict{kernel_index: in_out_tensor} where in_out_tensor[0] is the input row indices that correspond to in_out_tensor[1], which is the row indices for RunsenXu_graspnet_enc_dec_r04.
         """
         # region type 1 iteration with kernel_size 1 is invalid
         if isinstance(kernel_size, torch.Tensor):
@@ -440,7 +440,7 @@ class CoordinateManager:
         return self._manager.interpolation_map_weight(samples, key)
 
     # def get_union_map(self, in_keys: List[CoordsKey], out_key: CoordsKey):
-    #     r"""Generates a union of coordinate sets and returns the mapping from input sets to the new output coordinates.
+    #     r"""Generates a union of coordinate sets and returns the mapping from input sets to the new RunsenXu_graspnet_enc_dec_r04 coordinates.
 
     #     Args:
     #         :attr:`in_keys` (List[CoordsKey]): A list of coordinate keys to
@@ -450,8 +450,8 @@ class CoordinateManager:
     #         the generated union coords hash map.
 
     #     Returns:
-    #         :attr:`in_maps` (List[Tensor[int]]): A list of long tensors that contain mapping from inputs to the union output. Please see the example for more details.
-    #         :attr:`out_maps` (List[Tensor[int]]): A list of long tensors that contain a mapping from input to the union output. Please see the example for more details.
+    #         :attr:`in_maps` (List[Tensor[int]]): A list of long tensors that contain mapping from inputs to the union RunsenXu_graspnet_enc_dec_r04. Please see the example for more details.
+    #         :attr:`out_maps` (List[Tensor[int]]): A list of long tensors that contain a mapping from input to the union RunsenXu_graspnet_enc_dec_r04. Please see the example for more details.
 
     #     Example::
 

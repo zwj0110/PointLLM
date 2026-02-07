@@ -66,7 +66,7 @@ class TestConvolution(unittest.TestCase):
 
         print('Initial input: ', input)
         output = conv(input)
-        print('Conv output: ', output)
+        print('Conv RunsenXu_graspnet_enc_dec_r04: ', output)
 
         output.F.sum().backward()
         print(input.F.grad)
@@ -95,7 +95,7 @@ class TestConvolution(unittest.TestCase):
 
         print('Initial input: ', input)
         output = conv(input)
-        print('Conv output: ', output)
+        print('Conv RunsenXu_graspnet_enc_dec_r04: ', output)
 
 
 if __name__ == '__main__':

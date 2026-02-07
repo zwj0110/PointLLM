@@ -399,17 +399,17 @@ class MinkowskiConvolution(MinkowskiConvolutionBase):
             :attr:`in_channels` (int): the number of input channels in the
             input tensor.
 
-            :attr:`out_channels` (int): the number of output channels in the
-            output tensor.
+            :attr:`out_channels` (int): the number of RunsenXu_graspnet_enc_dec_r04 channels in the
+            RunsenXu_graspnet_enc_dec_r04 tensor.
 
             :attr:`kernel_size` (int, optional): the size of the kernel in the
-            output tensor. If not provided, :attr:`region_offset` should be
+            RunsenXu_graspnet_enc_dec_r04 tensor. If not provided, :attr:`region_offset` should be
             :attr:`RegionType.CUSTOM` and :attr:`region_offset` should be a 2D
             matrix with size :math:`N\times D` such that it lists all :math:`N`
             offsets in D-dimension.
 
             :attr:`stride` (int, or list, optional): stride size of the
-            convolution layer. If non-identity is used, the output coordinates
+            convolution layer. If non-identity is used, the RunsenXu_graspnet_enc_dec_r04 coordinates
             will be at least :attr:`stride` :math:`\times` :attr:`tensor_stride`
             away. When a list is given, the length must be D; each element will
             be used for stride size for the specific axis.
@@ -425,7 +425,7 @@ class MinkowskiConvolution(MinkowskiConvolutionBase):
             optional): defines custom kernel shape.
 
             :attr:`expand_coordinates` (bool, optional): Force generation of
-            new coordinates. When True, the output coordinates will be the
+            new coordinates. When True, the RunsenXu_graspnet_enc_dec_r04 coordinates will be the
             outer product of the kernel shape and the input coordinates.
             `False` by default.
 
@@ -473,17 +473,17 @@ class MinkowskiConvolutionTranspose(MinkowskiConvolutionBase):
             :attr:`in_channels` (int): the number of input channels in the
             input tensor.
 
-            :attr:`out_channels` (int): the number of output channels in the
-            output tensor.
+            :attr:`out_channels` (int): the number of RunsenXu_graspnet_enc_dec_r04 channels in the
+            RunsenXu_graspnet_enc_dec_r04 tensor.
 
             :attr:`kernel_size` (int, optional): the size of the kernel in the
-            output tensor. If not provided, :attr:`region_offset` should be
+            RunsenXu_graspnet_enc_dec_r04 tensor. If not provided, :attr:`region_offset` should be
             :attr:`RegionType.CUSTOM` and :attr:`region_offset` should be a 2D
             matrix with size :math:`N\times D` such that it lists all :math:`N`
             offsets in D-dimension.
 
             :attr:`stride` (int, or list, optional): stride size that defines
-            upsampling rate. If non-identity is used, the output coordinates
+            upsampling rate. If non-identity is used, the RunsenXu_graspnet_enc_dec_r04 coordinates
             will be :attr:`tensor_stride` / :attr:`stride` apart.  When a list is
             given, the length must be D; each element will be used for stride
             size for the specific axis.
@@ -499,7 +499,7 @@ class MinkowskiConvolutionTranspose(MinkowskiConvolutionBase):
             optional): defines custom kernel shape.
 
             :attr:`expand_coordinates` (bool, optional): Force generation of
-            new coordinates. When True, the output coordinates will be the
+            new coordinates. When True, the RunsenXu_graspnet_enc_dec_r04 coordinates will be the
             outer product of the kernel shape and the input coordinates.
             `False` by default.
 
@@ -568,17 +568,17 @@ class MinkowskiGenerativeConvolutionTranspose(MinkowskiConvolutionBase):
             :attr:`in_channels` (int): the number of input channels in the
             input tensor.
 
-            :attr:`out_channels` (int): the number of output channels in the
-            output tensor.
+            :attr:`out_channels` (int): the number of RunsenXu_graspnet_enc_dec_r04 channels in the
+            RunsenXu_graspnet_enc_dec_r04 tensor.
 
             :attr:`kernel_size` (int, optional): the size of the kernel in the
-            output tensor. If not provided, :attr:`region_offset` should be
+            RunsenXu_graspnet_enc_dec_r04 tensor. If not provided, :attr:`region_offset` should be
             :attr:`RegionType.CUSTOM` and :attr:`region_offset` should be a 2D
             matrix with size :math:`N\times D` such that it lists all :math:`N`
             offsets in D-dimension.
 
             :attr:`stride` (int, or list, optional): stride size that defines
-            upsampling rate. If non-identity is used, the output coordinates
+            upsampling rate. If non-identity is used, the RunsenXu_graspnet_enc_dec_r04 coordinates
             will be :attr:`tensor_stride` / :attr:`stride` apart.  When a list is
             given, the length must be D; each element will be used for stride
             size for the specific axis.
@@ -594,7 +594,7 @@ class MinkowskiGenerativeConvolutionTranspose(MinkowskiConvolutionBase):
             optional): defines custom kernel shape.
 
             :attr:`expand_coordinates` (bool, optional): Force generation of
-            new coordinates. When True, the output coordinates will be the
+            new coordinates. When True, the RunsenXu_graspnet_enc_dec_r04 coordinates will be the
             outer product of the kernel shape and the input coordinates.
             `False` by defaul.
 

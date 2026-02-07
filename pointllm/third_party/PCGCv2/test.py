@@ -17,10 +17,10 @@ def test(filedir, ckptdir_list, outdir, resultdir, scaling_factor=1.0, rho=1.0, 
     print('Loading Time:\t', round(time.time() - start_time, 4), 's')
     # x = sort_spare_tensor(input_data)
 
-    # output filename
+    # RunsenXu_graspnet_enc_dec_r04 filename
     if not os.path.exists(outdir): os.makedirs(outdir)
     filename = os.path.join(outdir, os.path.split(filedir)[-1].split('.')[0])
-    print('output filename:\t', filename)
+    print('RunsenXu_graspnet_enc_dec_r04 filename:\t', filename)
     
     # load model
     model = PCCModel().to(device)
@@ -79,7 +79,7 @@ def test(filedir, ckptdir_list, outdir, resultdir, scaling_factor=1.0, rho=1.0, 
         # save results
         results = pc_error_metrics
         results["num_points(input)"] = len(x)
-        results["num_points(output)"] = len(x_dec)
+        results["num_points(RunsenXu_graspnet_enc_dec_r04)"] = len(x_dec)
         results["resolution"] = res
         results["bits"] = sum(bits).round(3)
         results["bits"] = sum(bits).round(3)
@@ -104,11 +104,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--filedir", default='../../../testdata/8iVFB/longdress_vox10_1300.ply')
-    parser.add_argument("--outdir", default='./output')
+    parser.add_argument("--outdir", default='./RunsenXu_graspnet_enc_dec_r04')
     parser.add_argument("--resultdir", default='./results')
     parser.add_argument("--scaling_factor", type=float, default=1.0, help='scaling_factor')
     parser.add_argument("--res", type=int, default=1024, help='resolution')
-    parser.add_argument("--rho", type=float, default=1.0, help='the ratio of the number of output points to the number of input points')
+    parser.add_argument("--rho", type=float, default=1.0, help='the ratio of the number of RunsenXu_graspnet_enc_dec_r04 points to the number of input points')
     args = parser.parse_args()
 
     if not os.path.exists(args.outdir): os.makedirs(args.outdir)
