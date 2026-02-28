@@ -55,10 +55,12 @@ def _rate_from_likelihoods(lk):
     eps = 1e-9
     if lk is None: return None
     try:
-        if torch.is_tensor(lk): return (-torch.log2(lk.clamp_min(eps))).mean()
+        # 必须用 .sum() 来计算总比特数
+        if torch.is_tensor(lk): return (-torch.log2(lk.clamp_min(eps))).sum()
         if isinstance(lk, dict):
-            vals = [(-torch.log2(v.clamp_min(eps))).mean() for v in lk.values() if torch.is_tensor(v)]
-            return torch.stack(vals).mean() if vals else None
+            # 如果有超先验网络(Hyperprior)，会有多个似然值(比如 y 和 z)，都需要累加求和
+            vals = [(-torch.log2(v.clamp_min(eps))).sum() for v in lk.values() if torch.is_tensor(v)]
+            return torch.stack(vals).sum() if vals else None
     except Exception:
         return None
     return None
@@ -66,11 +68,22 @@ def _rate_from_likelihoods(lk):
 
 def _remap_adapter_keys_for_grasp(sd: dict) -> dict:
     out = {}
+    # 定义所有可能的前缀，包括旧的 'core' 和新的 'grasp_net'
+    # 逻辑：只要去掉这些前缀，剩下的就是 vox_enc.adapter... 这种标准名字
+    prefixes = [
+        "model.point_backbone.grasp_net.",  # [新增] 对应 GraspPerceptualWrapper
+        "point_backbone.grasp_net.",        # [新增]
+        "grasp_net.",                       # [新增]
+        "model.point_backbone.core.",       # [旧] 对应 GraspReconWrapper
+        "point_backbone.core.",             # [旧]
+        "core."                             # [旧]
+    ]
+
     for k, v in sd.items():
         k2 = k
-        for prefix in ["model.point_backbone.core.", "point_backbone.core.", "core."]:
+        for prefix in prefixes:
             if k2.startswith(prefix):
-                k2 = k2[len(prefix):]
+                k2 = k2[len(prefix):] # 剥离前缀
                 break
         out[k2] = v
     return out
@@ -306,7 +319,7 @@ def build_grasp_bridge(
     modules_cfg = _inspect_and_force_num_points(modules_cfg, clean_sd)
 
     # 3. Init & Load
-    core = GeoResCompression(modules_cfg, SimpleNamespace(phase="test")).to(device).float()
+    core = GeoResCompression(modules_cfg, SimpleNamespace(phase="modelnet40_test_all")).to(device).float()
     try:
         core.load_state_dict(clean_sd, strict=True)
         logger.info(f"✅ [GraspBridge] Successfully loaded weights (Strict Mode).")
@@ -345,6 +358,6 @@ def build_grasp_bridge(
             core.load_state_dict(sd, strict=False)
             matched = len(sd)
             logger.info(f"✅ [GraspBridge] Loaded Adapter weights: {matched} tensors.")
-
+    print("DEBUG: vox_enc.adapter is:", getattr(core.vox_enc, 'adapter', 'Not Created Yet'))
     bridge = GraspBridge(core=core, voxel_size=voxel_size, npoints=npoints).to(device).float().eval()
     return bridge, matched, total_raw
